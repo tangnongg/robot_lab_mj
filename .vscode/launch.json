@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Train",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mjlab.scripts.train",
+            "args": [
+                "Mjlab-Velocity-Flat-Go2w"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python: Play",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mjlab.scripts.play",
+            "args": [
+                "Mjlab-Velocity-Flat-Go2w"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}

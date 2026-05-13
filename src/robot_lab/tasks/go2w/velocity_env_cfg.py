@@ -642,7 +642,10 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
 
     decimation=4,
     sim=SimulationCfg(
-      nconmax=35,
+      ## when play, this below appears(where the policy is bad, many part of the dog contact with ground)
+      # broadphase overflow - please increase nconmax to 38 or naconmax to 38
+      # broadphase overflow - please increase nconmax to 37 or naconmax to 37
+      nconmax=50,
       njmax=1500,
       mujoco=MujocoCfg(
         timestep=0.005,

@@ -145,6 +145,14 @@ def unitree_go2w_rough_env_cfg(
     "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
     "FR_foot_joint", "FL_foot_joint", "RR_foot_joint", "RL_foot_joint",
   )
+  # 广度顺序 like robot_lab
+  # joint_names = (
+  #   # "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+  #   # "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+  #   # "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+  #   # "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+  #   # "FR_foot_joint", "FL_foot_joint", "RR_foot_joint", "RL_foot_joint",
+  # )
 
   ## Observations
   
@@ -177,9 +185,14 @@ def unitree_go2w_rough_env_cfg(
   )
 
   ## 
-
-  # some term should be remained!!
-  # cfg.events = {}
+  del cfg.events["randomize_rigid_body_mass_and_inertia"]
+  del cfg.events["randomize_com_positions"]
+  del cfg.events["randomize_apply_external_force_torque"]
+  del cfg.events["randomize_reset_joints"]
+  del cfg.events["randomize_joint_stiffness"]
+  del cfg.events["randomize_joint_damping"]
+  del cfg.events["randomize_reset_base"]
+  del cfg.events["randomize_push_robot"]
 
   ## Actions
 
@@ -202,13 +215,14 @@ def unitree_go2w_rough_env_cfg(
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
-  joint_pos_action.scale = {".*_hip_joint": 0.125, "^(?!.*_hip_joint).*": 0.25}
+  # Available list comes from joint_names variable defined above, but no foot joints?
+  joint_pos_action.scale = {".*_hip_joint": 0.125, "^(?!.*_hip_joint).*": 0.25} 
   cfg.actions["joint_pos"].clip = {".*": (-100.0, 100.0)}
-  joint_pos_action.actuator_names = joint_names[:-4]
+  joint_pos_action.actuator_names = joint_names[:-4] # speicify the joint order of joint_pos action
 
   cfg.actions["joint_vel"].scale = 5.0
   cfg.actions["joint_vel"].clip = {".*": (-100.0, 100.0)}
-  cfg.actions["joint_vel"].actuator_names = joint_names[-4:]
+  cfg.actions["joint_vel"].actuator_names = joint_names[-4:]  # speicify the joint order of joint_vel action
 
   ## Rewards
 
@@ -344,6 +358,26 @@ def unitree_go2w_rough_env_cfg(
   del cfg.rewards["joint_vel_wheel_l2"]
   del cfg.rewards["wheel_vel_penalty"]
 
+  # delete regularization rewards
+  del cfg.rewards["lin_vel_z_l2"]
+  del cfg.rewards["ang_vel_xy_l2"]
+  del cfg.rewards["joint_torques_l2"]
+  del cfg.rewards["joint_acc_l2"]
+  del cfg.rewards["joint_pos_limits"]
+  del cfg.rewards["joint_power"]
+  del cfg.rewards["stand_still_without_cmd"]
+  del cfg.rewards["joint_pos_penalty"]
+  del cfg.rewards["wheel_vel_stand_penalty"]
+  del cfg.rewards["joint_mirror"]
+  # del cfg.rewards["action_rate_l2"]
+  del cfg.rewards["undesired_contacts"]
+  del cfg.rewards["contact_forces"]
+  # del cfg.rewards["track_lin_vel_xy_exp"]
+  # del cfg.rewards["track_ang_vel_z_exp"]
+  del cfg.rewards["feet_contact_without_cmd"]
+  del cfg.rewards["upward"]
+  del cfg.rewards["joint_acc_wheel_l2"]
+
   ## Terminations
 
   del cfg.terminations["illegal_contact"]
@@ -374,6 +408,26 @@ def unitree_go2w_rough_env_cfg(
       mode="reset",
       params={},
     )
+
+    # if args_cli.keyboard:
+    #   cfg.scene.num_envs = 1
+    #   cfg.terminations.time_out = None
+    #   cfg.commands.base_velocity.debug_vis = False
+    #   config = Se2KeyboardCfg(
+    #       v_x_sensitivity=cfg.commands.base_velocity.ranges.lin_vel_x[1],
+    #       v_y_sensitivity=cfg.commands.base_velocity.ranges.lin_vel_y[1],
+    #       omega_z_sensitivity=cfg.commands.base_velocity.ranges.ang_vel_z[1],
+    #   )
+    #   controller = Se2Keyboard(config)
+    #   cfg.observations.policy.velocity_commands = ObsTerm(
+    #       func=lambda env: torch.tensor(controller.advance(), dtype=torch.float32).unsqueeze(0).to(env.device),
+    #   )
+
+    # TODO: add a fixed velocity command generator for play, fixed velocity command
+    # from mjlab.managers.command_manager import FixedVelocityCommandCfg
+    # cfg.commands["base_velocity"] = FixedVelocityCommandCfg(
+    #   ...,
+    # )
 
     if cfg.scene.terrain is not None:
       if cfg.scene.terrain.terrain_generator is not None:

@@ -42,3 +42,22 @@ class UniformThresholdVelocityCommandCfg(UniformVelocityCommandCfg):
     class_type: type = UniformThresholdVelocityCommand
 
 
+# TODO: add a fixed velocity command generator for play
+# # Customized command generator for play, fixed velocity command 
+# class FixedVelocityCommand(CommandTerm):
+#     """Command generator that generates a velocity command in SE(2) from uniform distribution with threshold."""
+
+#     cfg: FixedVelocityCommandCfg
+#     """The configuration of the command generator."""
+
+#     def _resample_command(self, env_ids: torch.Tensor):
+#         # set small commands to zero
+#         self.vel_command_b[env_ids, :2] *= torch.tensor([0.0, 0.0], dtype=torch.float32).to(self.vel_command_b.device
+
+
+# @dataclass(kw_only=True)
+# class FixedVelocityCommandCfg(CommandTerm):
+#     """Configuration for the uniform threshold velocity command generator."""
+
+#     class_type: type = FixedVelocityCommand
+

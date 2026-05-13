@@ -1,8 +1,8 @@
-"""Velocity task configuration.
+# "Velocity task configuration.
 
-This module provides a factory function to create a base velocity task config.
-Robot-specific configurations call the factory and customize as needed.
-"""
+# This module provides a factory function to create a base velocity task config.
+# Robot-specific configurations call the factory and customize as needed.
+# "
 
 import math
 from dataclasses import replace
@@ -31,15 +31,15 @@ from mjlab.sensor import (
 )
 from mjlab.sim import MujocoCfg, SimulationCfg
 from robot_lab.tasks.go2w import mdp
-from robot_lab.tasks.go2w.mdp import UniformVelocityCommandCfg
+from robot_lab.tasks.go2w.mdp import UniformThresholdVelocityCommandCfg
 from mjlab.terrains import TerrainEntityCfg
-from mjlab.terrains.config import ROUGH_TERRAINS_CFG
+from robot_lab.terrains.rough import ROUGH_TERRAINS_CFG
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 
 def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
-  """Create base velocity tracking task configuration."""
+  "Create base velocity tracking task configuration."
 
   ##
   # Sensors
@@ -54,6 +54,10 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     exclude_parent_body=True,
     include_geom_groups=(0,),  # Terrain only.
     debug_vis=True,
+    # viz default: 
+        # hit: green
+        # miss: red
+        # hit sphere: cyan
   )
 
   height_scanner_base = RayCastSensorCfg(
@@ -91,16 +95,16 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
 
   #TODO: rel_forward_envs needs to be cehcked
   commands: dict[str, CommandTermCfg] = {
-    "base_velocity": UniformVelocityCommandCfg(
+    "base_velocity": UniformThresholdVelocityCommandCfg(
       entity_name="robot",
       resampling_time_range=(10.0, 10.0),
       rel_standing_envs=0.02,
       rel_heading_envs=1.0,
-      rel_forward_envs=0.2,
+      rel_forward_envs=0.0, # in IsaacLab this doesn't exist
       heading_command=True,
       heading_control_stiffness=0.5,
       debug_vis=True,
-      ranges=UniformVelocityCommandCfg.Ranges(
+      ranges=UniformThresholdVelocityCommandCfg.Ranges(
         lin_vel_x=(-1.0, 1.0),
         lin_vel_y=(-1.0, 1.0),
         ang_vel_z=(-1.0, 1.0),
@@ -193,7 +197,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       #     func = mdp.randomize_rigid_body_material,
       #     mode = "startup",
       #     params = {
-      #         "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+      #         "asset_cfg": SceneEntityCfg("robot", body_names=((".*")),
       #         "static_friction_range": (0.1, 1.0),
       #         "dynamic_friction_range": (0.1, 0.8),
       #         "restitution_range": (0.0, 0.5),
@@ -209,8 +213,8 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func = dr.pseudo_inertia,
           mode = "startup",
           params = {
-              "asset_cfg": SceneEntityCfg("robot", body_names=""),
-              "alpha_range": (-0.5, 0.5),
+              "asset_cfg": SceneEntityCfg("robot", body_names=()),
+              "alpha_range": (-0.1, 0.1), # 0.5
           },
       ),
 
@@ -219,7 +223,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       #     func = mdp.randomize_rigid_body_inertia,
       #     mode = "startup",
       #     params = {
-      #         "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+      #         "asset_cfg": SceneEntityCfg("robot", body_names=(".*")),
       #         "inertia_distribution_params": (0.5, 1.5),
       #         "operation": "scale",
       #     },
@@ -229,8 +233,8 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func = dr.body_com_offset,
           mode = "startup",
           params = {
-              "asset_cfg": SceneEntityCfg("robot", body_names=""),
-              "range": (-0.1, 0.1),
+              "asset_cfg": SceneEntityCfg("robot", body_names=()),
+              "ranges": (-0.1, 0.1),
               "operation": "add",
           },
       ),
@@ -240,7 +244,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func = mdp.apply_external_force_torque,
           mode = "reset",
           params = {
-              "asset_cfg": SceneEntityCfg("robot", body_names=""),
+              "asset_cfg": SceneEntityCfg("robot", body_names=()),
               "force_range": (-10.0, 10.0),
               "torque_range": (-10.0, 10.0),
           },
@@ -260,8 +264,8 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func = dr.joint_stiffness,
           mode = "reset",
           params = {
-              "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-              "range": (0.5, 2.0),
+              "asset_cfg": SceneEntityCfg("robot", joint_names=(".*")),
+              "ranges": (0.5, 2.0),
               "operation": "scale",
               "distribution": "log_uniform",
           },
@@ -271,8 +275,8 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func = dr.joint_damping,
           mode = "reset",
           params = {
-              "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-              "range": (0.5, 2.0),
+              "asset_cfg": SceneEntityCfg("robot", joint_names=(".*")),
+              "ranges": (0.5, 2.0),
               "operation": "scale",
               "distribution": "log_uniform",
           },
@@ -332,7 +336,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func=mdp.base_height_l2,
           weight=0.0,
           params={
-              "asset_cfg": SceneEntityCfg("robot", body_names=""),
+              "asset_cfg": SceneEntityCfg("robot", body_names=()),
               "sensor_name": "height_scanner_base",
               "target_height": 0.0,
           },
@@ -340,40 +344,40 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       "body_lin_acc_l2": RewardTermCfg(
           func=mdp.body_lin_acc_l2,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", body_names="")},
+          params={"asset_cfg": SceneEntityCfg("robot", body_names=())},
       ),
 
       # ---------- Joint penalties ----------
       "joint_torques_l2": RewardTermCfg(
           func=mdp.joint_torques_l2,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+          params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*"))},
       ),
       "joint_vel_l2": RewardTermCfg(
           func=mdp.joint_vel_l2,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+          params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*"))},
       ),
       "joint_acc_l2": RewardTermCfg(
           func=mdp.joint_acc_l2,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+          params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*"))},
       ),
       # here is create_joint_deviation_l1_rewterm（joint_deviation_l1）
       "joint_pos_limits": RewardTermCfg(
           func=mdp.joint_pos_limits,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+          params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*"))},
       ),
       "joint_vel_limits": RewardTermCfg(
           func=mdp.joint_vel_limits,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*"), "soft_ratio": 1.0},
+          params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*")), "soft_ratio": 1.0},
       ),
       "joint_power": RewardTermCfg(
           func=mdp.joint_power,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+          params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*"))},
       ),
       "stand_still_without_cmd": RewardTermCfg(
           func=mdp.stand_still_without_cmd,
@@ -381,7 +385,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           params={
               "command_name": "base_velocity",
               "command_threshold": 0.1,
-              "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+              "asset_cfg": SceneEntityCfg("robot", joint_names=(".*")),
           },
       ),
       "joint_pos_penalty": RewardTermCfg(
@@ -389,19 +393,18 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           weight=0.0,
           params={
               "command_name": "base_velocity",
-              "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+              "asset_cfg": SceneEntityCfg("robot", joint_names=(".*")),
               "stand_still_scale": 5.0,
               "velocity_threshold": 0.5,
               "command_threshold": 0.1,
           },
       ),
-      #TODO: "sensor_name": "contact_forces", need to fix
       "wheel_vel_penalty": RewardTermCfg(
           func=mdp.wheel_vel_penalty,
           weight=0.0,
           params={
-              "asset_cfg": SceneEntityCfg("robot", joint_names=""),
-              "sensor_name": "contact_forces",
+              "asset_cfg": SceneEntityCfg("robot", joint_names=()),
+              "sensor_name": "feet_ground_contact",
               "command_name": "base_velocity",
               "velocity_threshold": 0.5,
               "command_threshold": 0.1,
@@ -411,7 +414,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func=mdp.wheel_vel_stand_penalty,
           weight=0.0,
           params={
-              "asset_cfg": SceneEntityCfg("robot", joint_names=""),
+              "asset_cfg": SceneEntityCfg("robot", joint_names=()),
               "command_name": "base_velocity",
               "command_threshold": 0.1,
           },
@@ -449,7 +452,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       "applied_torque_limits": RewardTermCfg(
           func=mdp.applied_torque_limits,
           weight=0.0,
-          params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*")},
+          params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*"))},
       ),
       "action_rate_l2": RewardTermCfg(
           func=mdp.action_rate_l2,
@@ -461,7 +464,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func=mdp.undesired_contacts,
           weight=0.0,
           params={
-              "sensor_name": "contact_forces",
+              "sensor_name": "nonfeet_all_contact",
               "threshold": 1.0,
           },
       ),
@@ -469,7 +472,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func=mdp.contact_forces,
           weight=0.0,
           params={
-            "sensor_name": "contact_forces", 
+            "sensor_name": "feet_ground_contact", 
             "threshold": 100.0},
       ),
 
@@ -502,13 +505,11 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func=mdp.feet_gait,  
           weight=0.0,
           params={
-              "std": math.sqrt(0.5),
-              "command_name": "base_velocity",
-              "max_err": 0.2,
-              "velocity_threshold": 0.5,
+              "period":0.6,
+              "offset" : [0.0, 0.5],
+              "threshold": 0.56,
               "command_threshold": 0.1,
-              "synced_feet_pair_names": (("", ""), ("", "")),
-              "asset_cfg": SceneEntityCfg("robot"),
+              "command_name": "base_velocity",
               "sensor_name": "feet_ground_contact",
           },
       ),
@@ -539,14 +540,14 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           weight=0.0,
           params={
               "sensor_name": "feet_ground_contact",
-              "asset_name": "robot",
+              "asset_cfg": SceneEntityCfg("robot"),
           },
       ),
       "feet_height": RewardTermCfg(
           func=mdp.feet_height,
           weight=0.0,
           params={
-              "asset_cfg": SceneEntityCfg("robot", body_names=""),
+              "asset_cfg": SceneEntityCfg("robot", body_names=()),
               "tanh_mult": 2.0,
               "target_height": 0.05,
               "command_name": "base_velocity",
@@ -556,7 +557,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           func=mdp.feet_height_body,
           weight=0.0,
           params={
-              "asset_cfg": SceneEntityCfg("robot", body_names=""),
+              "asset_cfg": SceneEntityCfg("robot", body_names=()),
               "tanh_mult": 2.0,
               "target_height": -0.3,
               "command_name": "base_velocity",
@@ -567,14 +568,14 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
           weight=0.0,
           params={
               "std": math.sqrt(0.25),
-              "asset_cfg": SceneEntityCfg("robot", body_names=""),
+              "asset_cfg": SceneEntityCfg("robot", body_names=()),
               "stance_width": float,  
           },
       ),
       # "feet_distance_xy_exp": {...},  
 
       "upward": RewardTermCfg(
-          func=mdp.upright,
+          func=mdp.upward,
           weight=0.0,
       ),
   }
@@ -589,14 +590,23 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     #   func=mdp.bad_orientation,
     #   params={"limit_angle": math.radians(70.0)},
     # ),
-    "out_of_terrain_bounds": TerminationTermCfg(
+    "terrain_out_of_bounds": TerminationTermCfg(
       func=mdp.out_of_terrain_bounds,
+      params={"asset_cfg": SceneEntityCfg("robot"), "distance_buffer": 3.0},
       time_out=True,
     ),
+    # not used in robot_lab
     "illegal_contact": TerminationTermCfg(
       func=mdp.illegal_contact,
-      params={"sensor_name": "nonfeet_ground_cfg"},
+      params={"sensor_name": "nonfeet_ground_contact"},
       time_out=True,
+    ),
+    ## The observation group 'actor' returned by the environment contains NaN values.
+    # This cuases the rsl-rl training to crash.
+    "nan_term": TerminationTermCfg(
+      func=mdp.nan_detection,
+      params={},
+      time_out=False,
     ),
   }
 
@@ -607,7 +617,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
   curriculum = {
     "terrain_levels": CurriculumTermCfg(
       func=mdp.terrain_levels_vel,
-      params={"command_name": "base_velocity"},
+      # params={"command_name": "base_velocity"},
     ),
     # "command_vel": CurriculumTermCfg(
     #   func=mdp.commands_vel,

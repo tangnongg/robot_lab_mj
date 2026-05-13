@@ -11,3 +11,6 @@ wheels/
 
 # Training logs
 logs/
+wandb/
+draft.txt
+train_task_help.txt

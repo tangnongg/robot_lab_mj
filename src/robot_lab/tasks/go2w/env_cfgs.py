@@ -22,12 +22,10 @@ from mjlab.sensor import (
   TerrainHeightSensorCfg,
 )
 from robot_lab.tasks.go2w import mdp
-from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
-from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from robot_lab.tasks.go2w.mdp import UniformThresholdVelocityCommandCfg
+from robot_lab.tasks.go2w.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
-
-TerrainType = Literal["rough", "obstacles"]
 
 def unitree_go2w_rough_env_cfg(
   play: bool = False,
@@ -49,7 +47,8 @@ def unitree_go2w_rough_env_cfg(
     if sensor.name == "terrain_scanner":
       assert isinstance(sensor, RayCastSensorCfg)
       assert isinstance(sensor.frame, ObjRef)
-      sensor.frame.name = "base"
+      # sensor.frame.name = "base"
+      sensor.frame.name = "imu_site"
 
   # Wire foot height scan to per-foot sites.
   foot_names = ("FR", "FL", "RR", "RL")
@@ -63,18 +62,31 @@ def unitree_go2w_rough_env_cfg(
         ObjRef(type="site", name=s, entity="robot") for s in site_names
       )
       sensor.pattern = RingPatternCfg.single_ring(radius=0.04, num_samples=4)
+  
+  # feet_ground_cfg = ContactSensorCfg(
+  #   name="feet_ground_contact",
+  #   primary=ContactMatch(mode="geom", pattern=geom_names, entity="robot"),
+  #   secondary=ContactMatch(mode="body", pattern="terrain"),
+  #   fields=("found", "force"),
+  #   reduce="netforce",
+  #   num_slots=1, 
+  #   track_air_time=True,
+  #   history_length=4,
+  # )
 
+  foot_body_names = ('FL_foot',  'FR_foot', 'RL_foot', 'RR_foot')
   feet_ground_cfg = ContactSensorCfg(
     name="feet_ground_contact",
-    primary=ContactMatch(mode="geom", pattern=geom_names, entity="robot"),
+    primary=ContactMatch(mode="body", pattern=foot_body_names, entity="robot"),
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found", "force"),
     reduce="netforce",
     num_slots=1, 
     track_air_time=True,
+    history_length=4,
   )
 
-  # used in illegal_contact
+  # used in illegal_contact, but not used in robot_lab
   nonfeet_ground_cfg = ContactSensorCfg(
     name="nonfeet_ground_contact",
     primary=ContactMatch(mode="geom", pattern=r".*_collision\d*$", entity="robot", exclude=tuple(geom_names)),
@@ -85,9 +97,34 @@ def unitree_go2w_rough_env_cfg(
     history_length=4,
   )
 
+  target_body_names = ('base', 
+                       'FL_hip', 'FL_thigh', 'FL_calf', 'FL_foot', 
+                       'FR_hip', 'FR_thigh', 'FR_calf', 'FR_foot', 
+                       'RL_hip', 'RL_thigh', 'RL_calf', 'RL_foot', 
+                       'RR_hip', 'RR_thigh', 'RR_calf', 'RR_foot')
+  exclude_body_names = ('FL_foot', 'FR_foot', 'RL_foot', 'RR_foot')
+  
+  nonfeet_all_cfg = ContactSensorCfg(
+    name="nonfeet_all_contact",
+    # when mode="body", Available string:
+    # 'base', 'Head_upper', 'Head_lower', 'imu', 'terrain_scan', 'height_scanner_base', 
+    # 'FL_hip', 'FL_thigh', 'FL_calf', 'FL_calflower', 'FL_calflower1', 'FL_foot_motor', 'FL_foot', 
+    # 'FR_hip', 'FR_thigh', 'FR_calf', 'FR_calflower', 'FR_calflower1', 'FR_foot_motor', 'FR_foot', 
+    # 'RL_hip', 'RL_thigh', 'RL_calf', 'RL_calflower', 'RL_calflower1', 'RL_foot_motor', 'RL_foot', 
+    # 'RR_hip', 'RR_thigh', 'RR_calf', 'RR_calflower', 'RR_calflower1', 'RR_foot_motor', 'RR_foot'
+    primary=ContactMatch(mode="body", pattern=target_body_names, entity="robot", exclude=exclude_body_names ),
+    secondary_policy='any',
+    # secondary=ContactMatch(mode="body", pattern=("terrain",) + target_body_names, entity="robot"),
+    fields=("found", "force"),
+    reduce="netforce",
+    num_slots=1,
+    history_length=4,
+  )
+
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (
     feet_ground_cfg,
-    nonfeet_ground_cfg
+    nonfeet_ground_cfg,
+    nonfeet_all_cfg
   )
 
   if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
@@ -101,13 +138,13 @@ def unitree_go2w_rough_env_cfg(
   foot_link_name = ".*_foot"
   wheel_joint_name = ".*_foot_joint"
   joint_name = ".*_joint"
-  joint_names = [
+  joint_names = (
     "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
     "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
     "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
     "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
     "FR_foot_joint", "FL_foot_joint", "RR_foot_joint", "RL_foot_joint",
-  ]
+  )
 
   ## Observations
   
@@ -127,9 +164,22 @@ def unitree_go2w_rough_env_cfg(
   cfg.observations["actor"].terms["joint_vel"].scale = 0.05
   del cfg.observations["actor"].terms["base_lin_vel"]
   del cfg.observations["actor"].terms["height_scan"]
-  cfg.observations["actor"].terms["joint_pos"].params["asset_cfg"].joint_names = joint_names
-  cfg.observations["actor"].terms["joint_vel"].params["asset_cfg"].joint_names = joint_names
-  
+  # KeyError: 'asset_cfg'
+  # cfg.observations["actor"].terms["joint_pos"].params["asset_cfg"].joint_names = joint_names
+  # cfg.observations["actor"].terms["joint_vel"].params["asset_cfg"].joint_names = joint_names
+  cfg.observations["actor"].terms["joint_pos"].params["asset_cfg"] = SceneEntityCfg(
+    "robot", 
+    joint_names = joint_names
+  )
+  cfg.observations["actor"].terms["joint_vel"].params["asset_cfg"] = SceneEntityCfg(
+    "robot", 
+    joint_names = joint_names
+  )
+
+  ## 
+
+  # some term should be remained!!
+  # cfg.events = {}
 
   ## Actions
 
@@ -159,33 +209,32 @@ def unitree_go2w_rough_env_cfg(
   cfg.actions["joint_vel"].scale = 5.0
   cfg.actions["joint_vel"].clip = {".*": (-100.0, 100.0)}
   cfg.actions["joint_vel"].actuator_names = joint_names[-4:]
-  ## Events
 
   ## Rewards
 
   cfg.rewards["joint_vel_wheel_l2"] = RewardTermCfg(
     func=mdp.joint_vel_l2,
     weight=-0.0,
-    params={"asset_cfg": SceneEntityCfg("robot", joint_names=())},
+    params={"asset_cfg": SceneEntityCfg("robot")},
   )
 
   cfg.rewards["joint_acc_wheel_l2"] = RewardTermCfg(
     func=mdp.joint_acc_l2,
     weight=-0.0,
-    params={"asset_cfg": SceneEntityCfg("robot", joint_names=())},
+    params={"asset_cfg": SceneEntityCfg("robot")},
   )
 
   cfg.rewards["joint_torques_wheel_l2"] = RewardTermCfg(
-    func=mdp.joint_vel_l2,
+    func=mdp.joint_torques_l2,
     weight=-0.0,
-    params={"asset_cfg": SceneEntityCfg("robot", joint_names=())},
+    params={"asset_cfg": SceneEntityCfg("robot")},
   )
 
   cfg.rewards["stand_still_wheel"] = RewardTermCfg(
     func=mdp.stand_still_wheel,
     weight=-0.0,
     params={
-      "asset_cfg": SceneEntityCfg("robot", joint_names=()),
+      "asset_cfg": SceneEntityCfg("robot"),
       "command_threshold": 0.1,
       "command_name": "base_velocity",
     },
@@ -197,6 +246,7 @@ def unitree_go2w_rough_env_cfg(
   # Root penalties
   cfg.rewards["lin_vel_z_l2"].weight = -2.0
   cfg.rewards["ang_vel_xy_l2"].weight = -0.05
+
   cfg.rewards["flat_orientation_l2"].weight = 0
   cfg.rewards["base_height_l2"].weight = 0
   cfg.rewards["base_height_l2"].params["target_height"] = 0.40
@@ -206,35 +256,37 @@ def unitree_go2w_rough_env_cfg(
 
   # Joint penaltie
   cfg.rewards["joint_torques_l2"].weight = -2.5e-5
-  cfg.rewards["joint_torques_l2"].params["asset_cfg"].joint_names = [f"^(?!{wheel_joint_name}).*"]
+  cfg.rewards["joint_torques_l2"].params["asset_cfg"].joint_names = f"^(?!{wheel_joint_name}).*"
   cfg.rewards["joint_torques_wheel_l2"].weight = 0
-  cfg.rewards["joint_torques_wheel_l2"].params["asset_cfg"].joint_names = [wheel_joint_name]
+  cfg.rewards["joint_torques_wheel_l2"].params["asset_cfg"].joint_names = wheel_joint_name
   cfg.rewards["joint_vel_l2"].weight = 0
-  cfg.rewards["joint_vel_l2"].params["asset_cfg"].joint_names = [f"^(?!{wheel_joint_name}).*"]
+  cfg.rewards["joint_vel_l2"].params["asset_cfg"].joint_names = f"^(?!{wheel_joint_name}).*"
   cfg.rewards["joint_vel_wheel_l2"].weight = 0
-  cfg.rewards["joint_vel_wheel_l2"].params["asset_cfg"].joint_names = [wheel_joint_name]
+  cfg.rewards["joint_vel_wheel_l2"].params["asset_cfg"].joint_names = wheel_joint_name
   cfg.rewards["joint_acc_l2"].weight = -2.5e-7
-  cfg.rewards["joint_acc_l2"].params["asset_cfg"].joint_names = [f"^(?!{wheel_joint_name}).*"]
+  cfg.rewards["joint_acc_l2"].params["asset_cfg"].joint_names = f"^(?!{wheel_joint_name}).*"
   cfg.rewards["joint_acc_wheel_l2"].weight = -2.5e-9
-  cfg.rewards["joint_acc_wheel_l2"].params["asset_cfg"].joint_names = [wheel_joint_name]
+  cfg.rewards["joint_acc_wheel_l2"].params["asset_cfg"].joint_names = wheel_joint_name
   # cfg.rewards.create_joint_deviation_l1_rewterm("joint_deviation_hip_l1", -0.2, [".*_hip_joint"])
   cfg.rewards["joint_pos_limits"].weight = -5.0
-  cfg.rewards["joint_pos_limits"].params["asset_cfg"].joint_names = [f"^(?!{wheel_joint_name}).*"]
+  cfg.rewards["joint_pos_limits"].params["asset_cfg"].joint_names = f"^(?!{wheel_joint_name}).*"
   cfg.rewards["joint_vel_limits"].weight = 0
-  cfg.rewards["joint_vel_limits"].params["asset_cfg"].joint_names = [wheel_joint_name]
+  cfg.rewards["joint_vel_limits"].params["asset_cfg"].joint_names = wheel_joint_name
   cfg.rewards["joint_power"].weight = -2e-5
-  cfg.rewards["joint_power"].params["asset_cfg"].joint_names = [f"^(?!{wheel_joint_name}).*"]
+  cfg.rewards["joint_power"].params["asset_cfg"].joint_names = f"^(?!{wheel_joint_name}).*"
   cfg.rewards["stand_still_without_cmd"].weight = -2.0
-  cfg.rewards["stand_still_without_cmd"].params["asset_cfg"].joint_names = [f"^(?!{wheel_joint_name}).*"]
+  cfg.rewards["stand_still_without_cmd"].params["asset_cfg"].joint_names = f"^(?!{wheel_joint_name}).*"
+  # need to delete, otherwise it causes RuntimeError: Expected all 
+  #tensors to be on the same device, but found at least two devices, cuda:0 and cpu!
+  # del cfg.rewards["stand_still_wheel"] 
   # cfg.rewards.stand_still_wheel.weight = -0.01
   # cfg.rewards.stand_still_wheel.params["asset_cfg"].joint_names = [cfg.wheel_joint_name]
   cfg.rewards["joint_pos_penalty"].weight = -1.0  # TODO
-  cfg.rewards["joint_pos_penalty"].params["asset_cfg"].joint_names = [f"^(?!{wheel_joint_name}).*"]
+  cfg.rewards["joint_pos_penalty"].params["asset_cfg"].joint_names = f"^(?!{wheel_joint_name}).*"
   cfg.rewards["wheel_vel_penalty"].weight = 0
-  cfg.rewards["wheel_vel_penalty"].params["sensor_cfg"].body_names = [foot_link_name]
-  cfg.rewards["wheel_vel_penalty"].params["asset_cfg"].joint_names = [wheel_joint_name]
+  cfg.rewards["wheel_vel_penalty"].params["asset_cfg"].joint_names = wheel_joint_name
   cfg.rewards["wheel_vel_stand_penalty"].weight = -0.05
-  cfg.rewards["wheel_vel_stand_penalty"].params["asset_cfg"].joint_names = [wheel_joint_name]
+  cfg.rewards["wheel_vel_stand_penalty"].params["asset_cfg"].joint_names = wheel_joint_name
   cfg.rewards["joint_mirror"].weight = -0.05
   cfg.rewards["joint_mirror"].params["mirror_joints"] = [
       ["FR_(hip|thigh|calf).*", "RL_(hip|thigh|calf).*"],
@@ -246,9 +298,7 @@ def unitree_go2w_rough_env_cfg(
 
   # Contact sensor
   cfg.rewards["undesired_contacts"].weight = -1.0
-  cfg.rewards["undesired_contacts"].params["sensor_cfg"].body_names = [f"^(?!.*{foot_link_name}).*"]
   cfg.rewards["contact_forces"].weight = -1.5e-4
-  cfg.rewards["contact_forces"].params["sensor_cfg"].body_names = [foot_link_name]
 
   # Velocity-tracking rewards
   cfg.rewards["track_lin_vel_xy_exp"].weight = 3.0
@@ -256,29 +306,46 @@ def unitree_go2w_rough_env_cfg(
 
   # Others
   cfg.rewards["feet_air_time"].weight = 0
-  cfg.rewards["feet_air_time"].params["sensor_cfg"].body_names = [foot_link_name]
   cfg.rewards["feet_contact"].weight = 0
-  cfg.rewards["feet_contact"].params["sensor_cfg"].body_names = [foot_link_name]
   cfg.rewards["feet_contact_without_cmd"].weight = 0.1
-  cfg.rewards["feet_contact_without_cmd"].params["sensor_cfg"].body_names = [foot_link_name]
   cfg.rewards["feet_stumble"].weight = 0
-  cfg.rewards["feet_stumble"].params["sensor_cfg"].body_names = [foot_link_name]
   cfg.rewards["feet_slide"].weight = 0
-  cfg.rewards["feet_slide"].params["sensor_cfg"].body_names = [foot_link_name]
-  cfg.rewards["feet_slide"].params["asset_cfg"].body_names = [foot_link_name]
+  cfg.rewards["feet_slide"].params["asset_cfg"].body_names = foot_link_name
   cfg.rewards["feet_height"].weight = 0
   cfg.rewards["feet_height"].params["target_height"] = 0.1
-  cfg.rewards["feet_height"].params["asset_cfg"].body_names = [foot_link_name]
+  cfg.rewards["feet_height"].params["asset_cfg"].body_names = foot_link_name
   cfg.rewards["feet_height_body"].weight = 0
   cfg.rewards["feet_height_body"].params["target_height"] = -0.2
-  cfg.rewards["feet_height_body"].params["asset_cfg"].body_names = [foot_link_name]
+  cfg.rewards["feet_height_body"].params["asset_cfg"].body_names = foot_link_name
   cfg.rewards["feet_gait"].weight = 0
   cfg.rewards["feet_gait"].params["synced_feet_pair_names"] = (("FL_foot", "RR_foot"), ("FR_foot", "RL_foot"))
   cfg.rewards["upward"].weight = 1.0  
 
+  # del rewards whose weiget is zero
+  del cfg.rewards["stand_still_wheel"]
+  del cfg.rewards["action_mirror"]
+  del cfg.rewards["action_sync"]
+  del cfg.rewards["applied_torque_limits"]
+  del cfg.rewards["base_height_l2"]
+  del cfg.rewards["body_lin_acc_l2"]
+  del cfg.rewards["feet_air_time"]
+  del cfg.rewards["feet_contact"]
+  del cfg.rewards["feet_distance_y_exp"]
+  del cfg.rewards["feet_gait"]
+  del cfg.rewards["feet_height"]
+  del cfg.rewards["feet_height_body"]
+  del cfg.rewards["feet_slide"]
+  del cfg.rewards["feet_stumble"]
+  del cfg.rewards["flat_orientation_l2"]
+  del cfg.rewards["is_terminated"]
+  del cfg.rewards["joint_torques_wheel_l2"]
+  del cfg.rewards["joint_vel_l2"]
+  del cfg.rewards["joint_vel_limits"]
+  del cfg.rewards["joint_vel_wheel_l2"]
+  del cfg.rewards["wheel_vel_penalty"]
+
   ## Terminations
 
-  # self.terminations.illegal_contact.params["sensor_cfg"].body_names = [self.base_link_name, ".*_hip"]
   del cfg.terminations["illegal_contact"]
 
   ## Commands
@@ -335,10 +402,6 @@ def unitree_go2w_rough_env_cfg(
 #   # Remove raycast sensors and collision sensors not needed on flat.
 #   remove_sensors = {
 #     "terrain_scan",
-#     "self_collision",
-#     "thigh_ground_touch",
-#     "shank_ground_touch",
-#     "trunk_ground_touch",
 #   }
 #   cfg.scene.sensors = tuple(
 #     s for s in (cfg.scene.sensors or ()) if s.name not in remove_sensors
@@ -353,7 +416,7 @@ def unitree_go2w_rough_env_cfg(
 
 #   # On flat terrain fell_over is sufficient; thigh contact implies fallen.
 #   cfg.terminations.pop("illegal_contact", None)
-#   cfg.terminations.pop("out_of_terrain_bounds", None)
+#   cfg.terminations.pop("terrain_out_of_bounds", None)
 #   cfg.terminations["fell_over"] = TerminationTermCfg(
 #     func=mdp.bad_orientation,
 #     params={"limit_angle": math.radians(70.0)},
@@ -364,7 +427,7 @@ def unitree_go2w_rough_env_cfg(
 
 #   if play:
 #     base_velocity_cmd = cfg.commands["base_velocity"]
-#     assert isinstance(base_velocity_cmd, UniformVelocityCommandCfg)
+#     assert isinstance(base_velocity_cmd, UniformThresholdVelocityCommandCfg)
 #     base_velocity_cmd.ranges.lin_vel_x = (-1.5, 2.0)
 #     base_velocity_cmd.ranges.ang_vel_z = (-0.7, 0.7)
 

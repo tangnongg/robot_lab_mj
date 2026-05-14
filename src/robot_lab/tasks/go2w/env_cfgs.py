@@ -145,14 +145,27 @@ def unitree_go2w_rough_env_cfg(
     "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
     "FR_foot_joint", "FL_foot_joint", "RR_foot_joint", "RL_foot_joint",
   )
-  # 广度顺序 like robot_lab
-  # joint_names = (
-  #   # "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
-  #   # "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
-  #   # "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
-  #   # "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
-  #   # "FR_foot_joint", "FL_foot_joint", "RR_foot_joint", "RL_foot_joint",
-  # )
+
+  # joint_ids corresponding to joint_names
+  # in obs term of joint_pos_rel, not the order of joint_names. 
+  # manually set the joint_ids
+  joint_ids = [
+    4, 5, 6, 
+    0, 1, 2, 
+    12, 13, 14,
+    8, 9, 10, 
+    7, 3, 15, 11
+  ]
+
+  critic_joint_ids = [
+    # in robot_lab: 
+    # [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    # ["FL_hip_joint","FR_hip_joint","RL_hip_joint","RR_hip_joint",
+    # "FL_thigh_joint","FR_thigh_joint","RL_thigh_joint","RR_thigh_joint",
+    # "FL_calf_joint","FR_calf_joint","RL_calf_joint","RR_calf_joint",
+    # "FL_foot_joint","FR_foot_joint","RL_foot_joint","RR_foot_joint"]
+    3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8, 13, 12, 15, 14
+  ]
 
   ## Observations
   
@@ -172,16 +185,24 @@ def unitree_go2w_rough_env_cfg(
   cfg.observations["actor"].terms["joint_vel"].scale = 0.05
   del cfg.observations["actor"].terms["base_lin_vel"]
   del cfg.observations["actor"].terms["height_scan"]
-  # KeyError: 'asset_cfg'
-  # cfg.observations["actor"].terms["joint_pos"].params["asset_cfg"].joint_names = joint_names
-  # cfg.observations["actor"].terms["joint_vel"].params["asset_cfg"].joint_names = joint_names
+
   cfg.observations["actor"].terms["joint_pos"].params["asset_cfg"] = SceneEntityCfg(
     "robot", 
-    joint_names = joint_names
+    joint_ids =  joint_ids
   )
   cfg.observations["actor"].terms["joint_vel"].params["asset_cfg"] = SceneEntityCfg(
     "robot", 
-    joint_names = joint_names
+    joint_ids =  joint_ids
+  )
+
+  # BUG
+  cfg.observations["critic"].terms["joint_pos"].params["asset_cfg"] = SceneEntityCfg(
+    "robot", 
+    joint_ids =  critic_joint_ids
+  )
+  cfg.observations["critic"].terms["joint_vel"].params["asset_cfg"] = SceneEntityCfg(
+    "robot", 
+    joint_ids =  critic_joint_ids
   )
 
   ## 

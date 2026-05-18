@@ -460,50 +460,45 @@ def unitree_go2w_rough_env_cfg(
   return cfg
 
 
-# def unitree_go2w_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-#   """Create Unitree Go1 flat terrain velocity configuration."""
-#   cfg = unitree_go2w_rough_env_cfg(play=play)
+def unitree_go2w_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """Create Unitree Go1 flat terrain velocity configuration."""
+  cfg = unitree_go2w_rough_env_cfg(play=play)
 
-#   cfg.sim.njmax = 300
-#   cfg.sim.mujoco.ccd_iterations = 50
-#   cfg.sim.contact_sensor_maxmatch = 64
-#   cfg.sim.nconmax = None
+  cfg.sim.njmax = 300
+  cfg.sim.mujoco.ccd_iterations = 50
+  cfg.sim.contact_sensor_maxmatch = 64
+  cfg.sim.nconmax = None
 
-#   # Switch to flat terrain.
-#   assert cfg.scene.terrain is not None
-#   cfg.scene.terrain.terrain_type = "plane"
-#   cfg.scene.terrain.terrain_generator = None
+  # Switch to flat terrain.
+  assert cfg.scene.terrain is not None
+  cfg.scene.terrain.terrain_type = "plane"
+  cfg.scene.terrain.terrain_generator = None
 
-#   # Remove raycast sensors and collision sensors not needed on flat.
-#   remove_sensors = {
-#     "terrain_scan",
-#   }
-#   cfg.scene.sensors = tuple(
-#     s for s in (cfg.scene.sensors or ()) if s.name not in remove_sensors
-#   )
-#   del cfg.observations["actor"].terms["height_scan"]
-#   del cfg.observations["critic"].terms["height_scan"]
-#   cfg.rewards["upright"].params.pop("terrain_sensor_names", None)
+  # Remove raycast sensors and collision sensors not needed on flat.
+  remove_sensors = {
+    "terrain_scanner",
+  }
+  cfg.scene.sensors = tuple(
+    s for s in (cfg.scene.sensors or ()) if s.name not in remove_sensors
+  )
+ 
+  del cfg.observations["critic"].terms["height_scan"]
+  # cfg.rewards["upright"].params.pop("terrain_sensor_names", None)
 
-#   # Remove granular collision rewards (not useful on flat ground).
-#   for key in ("self_collisions", "shank_collision", "trunk_head_collision"):
-#     cfg.rewards.pop(key, None)
+  # Remove granular collision rewards (not useful on flat ground).
+  for key in ("self_collisions", "shank_collision", "trunk_head_collision"):
+    cfg.rewards.pop(key, None)
 
-#   # On flat terrain fell_over is sufficient; thigh contact implies fallen.
-#   cfg.terminations.pop("illegal_contact", None)
-#   cfg.terminations.pop("terrain_out_of_bounds", None)
-#   cfg.terminations["fell_over"] = TerminationTermCfg(
-#     func=mdp.bad_orientation,
-#     params={"limit_angle": math.radians(70.0)},
-#   )
+  # On flat terrain fell_over is sufficient; thigh contact implies fallen.
+  cfg.terminations.pop("illegal_contact", None)
 
-#   # Disable terrain curriculum (not present in play mode since rough clears all).
-#   cfg.curriculum.pop("terrain_levels", None)
+  # Disable terrain curriculum (not present in play mode since rough clears all).
+  cfg.curriculum.pop("terrain_levels", None)
 
-#   if play:
-#     base_velocity_cmd = cfg.commands["base_velocity"]
-#     assert isinstance(base_velocity_cmd, UniformThresholdVelocityCommandCfg)
-#     base_velocity_cmd.ranges.lin_vel_x = (-1.5, 2.0)
-#     base_velocity_cmd.ranges.ang_vel_z = (-0.7, 0.7)
+  if play:
+    base_velocity_cmd = cfg.commands["base_velocity"]
+    assert isinstance(base_velocity_cmd, UniformThresholdVelocityCommandCfg)
+    base_velocity_cmd.ranges.lin_vel_x = (-1.5, 2.0)
+    base_velocity_cmd.ranges.ang_vel_z = (-0.7, 0.7)
 
-#   return cfg
+  return cfg

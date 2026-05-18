@@ -177,7 +177,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     "actor": ObservationGroupCfg(
       terms=actor_terms,
       concatenate_terms=True,
-      enable_corruption=True,
+      enable_corruption=False,
     ),
     "critic": ObservationGroupCfg(
       terms=critic_terms,

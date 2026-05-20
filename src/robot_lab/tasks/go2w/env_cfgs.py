@@ -75,9 +75,10 @@ def unitree_go2w_rough_env_cfg(
   # )
 
   foot_body_names = ('FL_foot',  'FR_foot', 'RL_foot', 'RR_foot')
+  
   feet_ground_cfg = ContactSensorCfg(
     name="feet_ground_contact",
-    primary=ContactMatch(mode="body", pattern=foot_body_names, entity="robot"),
+    primary=ContactMatch(mode="geom", pattern=geom_names, entity="robot"),
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found", "force"),
     reduce="netforce",

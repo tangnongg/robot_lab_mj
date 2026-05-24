@@ -21,3 +21,18 @@
   - 做了静态校验：
       - python -m py_compile 通过
       - 做了一次轻量导入验证，确认新的 env cfg 可以构造
+
+
+
+
+
+   现在 viewer 里会画这几样东西：
+
+  - 目标高度柱：从 env_origin 竖直到指令的 base_height。src/robot_lab/tasks/b2_rpy_bh_track/mdp/commands.py:102
+  - 目标位置球：标出目标 base 高度点。src/robot_lab/tasks/b2_rpy_bh_track/mdp/commands.py:109
+  - 目标姿态 frame：把 command 的 roll/pitch/yaw 转成旋转矩阵后画坐标系。src/robot_lab/tasks/b2_rpy_bh_track/mdp/commands.py:115
+  - 当前 base 到目标 pose 的误差箭头。src/robot_lab/tasks/b2_rpy_bh_track/mdp/commands.py:125
+
+  补了 src/robot_lab/tasks/b2_rpy_bh_track/mdp/commands.py:145，把 frame 尺寸、球半径、柱半径和颜色都放进配置里，后面调 viewer 效果不用改逻辑。
+
+  有一个设计假设：因为这个 command 只有 rpy + height，没有 x/y，所以我把目标 frame 放在 env_origin.xy 上方。你确认一下是否要改成“放在机器人当前 xy 上方，只显示目标姿态和目标高度”？

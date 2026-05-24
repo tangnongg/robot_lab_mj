@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.utils.lab_api.math import (
+  matrix_from_quat,
   quat_error_magnitude,
   quat_from_euler_xyz,
   sample_uniform,
@@ -15,6 +17,7 @@ from mjlab.utils.lab_api.math import (
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+  from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 
 class UniformRpyBaseHeightCommand(CommandTerm):
@@ -73,6 +76,61 @@ class UniformRpyBaseHeightCommand(CommandTerm):
   def _update_command(self) -> None:
     return
 
+  def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
+    env_indices = visualizer.get_env_indices(self.num_envs)
+    if not env_indices:
+      return
+
+    env_origins = self._env.scene.env_origins.cpu().numpy()
+    current_pos_ws = self.robot.data.root_link_pos_w.cpu().numpy()
+    target_rot_ws = matrix_from_quat(self._desired_quat_w).cpu().numpy()
+    cmds = self._command.cpu().numpy()
+    frame_scale = self.cfg.viz.frame_scale
+    axis_radius = self.cfg.viz.axis_radius * visualizer.meansize
+    sphere_radius = self.cfg.viz.target_sphere_radius * visualizer.meansize
+    column_radius = self.cfg.viz.height_column_radius * visualizer.meansize
+    error_arrow_width = self.cfg.viz.error_arrow_width * visualizer.meansize
+
+    for batch in env_indices:
+      target_pos_w = env_origins[batch].copy()
+      target_pos_w[2] = cmds[batch, 3]
+
+      column_base = env_origins[batch].copy()
+      column_top = target_pos_w.copy()
+
+      visualizer.add_cylinder(
+        start=column_base,
+        end=column_top,
+        radius=column_radius,
+        color=self.cfg.viz.height_column_color,
+        label=f"target_height_column_{batch}",
+      )
+      visualizer.add_sphere(
+        center=target_pos_w,
+        radius=sphere_radius,
+        color=self.cfg.viz.target_sphere_color,
+        label=f"target_height_marker_{batch}",
+      )
+      visualizer.add_frame(
+        position=target_pos_w,
+        rotation_matrix=target_rot_ws[batch],
+        scale=frame_scale,
+        axis_radius=axis_radius,
+        alpha=self.cfg.viz.frame_alpha,
+        axis_colors=self.cfg.viz.frame_axis_colors,
+        label=f"target_pose_frame_{batch}",
+      )
+
+      current_pos_w = current_pos_ws[batch]
+      if np.linalg.norm(current_pos_w - target_pos_w) > 1.0e-6:
+        visualizer.add_arrow(
+          start=current_pos_w,
+          end=target_pos_w,
+          color=self.cfg.viz.error_arrow_color,
+          width=error_arrow_width,
+          label=f"pose_error_{batch}",
+        )
+
 
 @dataclass(kw_only=True)
 class UniformRpyBaseHeightCommandCfg(CommandTermCfg):
@@ -83,8 +141,26 @@ class UniformRpyBaseHeightCommandCfg(CommandTermCfg):
     yaw: tuple[float, float] = (-0.60, 0.60)
     base_height: tuple[float, float] = (0.52, 0.64)
 
+  @dataclass
+  class VizCfg:
+    frame_scale: float = 0.18
+    axis_radius: float = 0.08
+    frame_alpha: float = 0.9
+    target_sphere_radius: float = 0.22
+    height_column_radius: float = 0.06
+    error_arrow_width: float = 0.08
+    target_sphere_color: tuple[float, float, float, float] = (1.0, 0.55, 0.0, 0.45)
+    height_column_color: tuple[float, float, float, float] = (0.8, 0.8, 0.8, 0.25)
+    error_arrow_color: tuple[float, float, float, float] = (1.0, 0.2, 0.2, 0.65)
+    frame_axis_colors: tuple[tuple[float, float, float], ...] = (
+      (1.0, 0.45, 0.45),
+      (0.45, 1.0, 0.45),
+      (0.45, 0.6, 1.0),
+    )
+
   entity_name: str
   ranges: Ranges = field(default_factory=Ranges)
+  viz: VizCfg = field(default_factory=VizCfg)
 
   def build(self, env: "ManagerBasedRlEnv") -> UniformRpyBaseHeightCommand:
     return UniformRpyBaseHeightCommand(self, env)

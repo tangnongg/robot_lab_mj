@@ -90,7 +90,7 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
     "base_pose": UniformRpyBaseHeightCommandCfg(
       entity_name="robot",
       resampling_time_range=(4.0, 6.0),
-      debug_vis=False,
+      debug_vis=True,
       ranges=UniformRpyBaseHeightCommandCfg.Ranges(
         roll=(-0.30, 0.30),
         pitch=(-0.30, 0.30),

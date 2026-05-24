@@ -1,5 +1,10 @@
 # migrate "go2w loco" task of robot lab from IsaacLab to mjlab
 
+## common commands
+
+train Mjlab-RpyBhTrack-Flat-Unitree-B2 --env.scene.num-envs 4096   --agent.max-iterations 800
+play Mjlab-RpyBhTrack-Flat-Unitree-B2  --checkpoint_file  logs/rsl_rl/unitree_b2_rpy_bh_track/2026-05-24_20-16-54/model_799.pt
+
 ## install mjlab v1.3.0
 
 报错：   driver_ver = wp.context.runtime.driver_version

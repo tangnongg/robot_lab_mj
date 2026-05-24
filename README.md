@@ -1,5 +1,13 @@
 # migrate "go2w loco" task of robot lab from IsaacLab to mjlab
 
+## install mjlab v1.3.0
+
+报错：   driver_ver = wp.context.runtime.driver_version
+AttributeError: module 'warp' has no attribute 'context'. Did you mean: 'constant'?
+
+mujoco-warp                  3.8.0            pypi_0           pypi
+warp-lang                    1.12.1           pypi_0           pypi
+
 ## project structure
 
 在这个project中有两个task，anymal_c_velocity和go2w_loco,其中的anymal_c_velocity来自mjlab的example，用来说明如何组织目录结构，见Create_Task.md

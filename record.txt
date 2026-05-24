@@ -1,0 +1,23 @@
+  - 检查了现有任务结构，重点对照了 src/robot_lab/tasks/go2w/__init__.py:1 的组织方式，以及本机上的 mjlab / unitree_rl_mjlab 源码，确定新任务沿用“env_cfgs.py + rl_cfg.py + mdp/ + 注册”的模式。
+  - 在 src/robot_lab/tasks/b2_rpy_bh_track/__init__.py:1 新建了完整任务目录。
+  - 在 src/robot_lab/tasks/b2_rpy_bh_track/mdp/commands.py:20 实现了一个新的 4 维 command：roll / pitch / yaw / base_height，按区间均匀采样。
+  - 在 src/robot_lab/tasks/b2_rpy_bh_track/mdp/observations.py:19 实现了姿态与高度相关观测，包括当前 base RPY、base height、以及对 command 的误差。
+  - 在 src/robot_lab/tasks/b2_rpy_bh_track/mdp/rewards.py:20 实现了任务奖励，包含：
+      - 姿态跟踪奖励
+      - base height 跟踪奖励
+      - 足端接触数量奖励
+      - base 漂移/速度惩罚
+      - 非足端接触惩罚
+  - 在 src/robot_lab/tasks/b2_rpy_bh_track/env_cfgs.py:25 配置了一个 flat 版 B2 任务：
+      - 使用 unitree_b2 机器人
+      - 配置了 actor/critic observations
+      - 配置了 joint position action
+      - 配置了 reset / push 事件
+      - 配置了终止条件
+      - 配置了 viewer
+  - 在 src/robot_lab/tasks/b2_rpy_bh_track/rl_cfg.py:10 新增了对应 PPO runner 配置。
+  - 在 src/robot_lab/tasks/b2_rpy_bh_track/__init__.py:1 注册了任务 Mjlab-RpyBhTrack-Flat-Unitree-B2。
+  - 在总入口 src/robot_lab/tasks/__init__.py:1 把新任务接入了自动注册。
+  - 做了静态校验：
+      - python -m py_compile 通过
+      - 做了一次轻量导入验证，确认新的 env cfg 可以构造

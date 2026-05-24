@@ -1,4 +1,4 @@
-"""Unitree Go2W constants."""
+"""Unitree B2 constants."""
 
 from pathlib import Path
 
@@ -14,40 +14,41 @@ from mjlab.utils.spec_config import CollisionCfg
 # MJCF and assets.
 ##
 
-GO2W_XML: Path = (
-  ROBOT_LAB_SRC_PATH / "asset_zoo" / "robots" / "unitree_go2w" / "xmls" / "go2w.xml"
+B2_XML: Path = (
+  ROBOT_LAB_SRC_PATH / "asset_zoo" / "robots" / "unitree_b2" / "xmls" / "b2.xml"
 )
-assert GO2W_XML.exists()
+assert B2_XML.exists()
 
 
 def get_spec() -> mujoco.MjSpec:
-  return mujoco.MjSpec.from_file(str(GO2W_XML))
+  return mujoco.MjSpec.from_file(str(B2_XML))
 
 
 ##
 # Actuator config.
 ##
 
-GO2W_ACTUATOR_LEGS = DcMotorActuatorCfg(
+B2_ACTUATOR_HIP_THIGH = DcMotorActuatorCfg(
   target_names_expr=(
-    ".*hip_.*", ".*thigh_.*", ".*calf_.*",
+    ".*hip_.*", ".*thigh_.*",
   ),
-  effort_limit=23.5,
-  saturation_effort=23.5,
-  velocity_limit=30.0,
-  stiffness=25.0,
-  damping=0.5,
+  effort_limit=200.0,
+  saturation_effort=200.0,
+  velocity_limit=23.0,
+  stiffness=160.0,
+  damping=5.0,
   frictionloss=0.0,
   armature=None,
 )
 
-GO2W_ACTUATOR_WHEELS = DcMotorActuatorCfg(
-  target_names_expr=(".*_foot_joint",),
-  effort_limit=23.5,
-  saturation_effort=23.5,
-  velocity_limit=30.0,
-  stiffness=0.0,
-  damping=0.5,
+B2_ACTUATOR_CALF = DcMotorActuatorCfg(
+  target_names_expr=(".*calf_.*",),
+  effort_limit=320.0,
+  saturation_effort=320.0,
+  velocity_limit=14.0,
+  stiffness=160.0,
+  damping=5.0,
+  frictionloss=0.0,
   armature=None,
 )
 
@@ -56,14 +57,13 @@ GO2W_ACTUATOR_WHEELS = DcMotorActuatorCfg(
 ##
 
 INIT_STATE = EntityCfg.InitialStateCfg(
-  pos=(0.0, 0.0, 0.45),
+  pos=(0.0, 0.0, 0.58),
   joint_pos={
     ".*L_hip_joint": 0.0,
     ".*R_hip_joint": -0.0,
     "F.*_thigh_joint": 0.8,
     "R.*_thigh_joint": 0.8,
     ".*_calf_joint": -1.5,
-    ".*_foot_joint": 0.0,
   },
   joint_vel={".*": 0.0},
 )
@@ -102,17 +102,17 @@ FULL_COLLISION = CollisionCfg(
 # Final config.
 ##
 
-GO1_ARTICULATION = EntityArticulationInfoCfg(
+B2_ARTICULATION = EntityArticulationInfoCfg(
   actuators=(
-    GO2W_ACTUATOR_LEGS,
-    GO2W_ACTUATOR_WHEELS,
+    B2_ACTUATOR_HIP_THIGH,
+    B2_ACTUATOR_CALF,
   ),
   soft_joint_pos_limit_factor=0.9,
 )
 
 
-def get_unitree_go2w_robot_cfg() -> EntityCfg:
-  """Get a fresh Go1 robot configuration instance.
+def get_unitree_b2_robot_cfg() -> EntityCfg:
+  """Get a fresh B2 robot configuration instance.
 
   Returns a new EntityCfg instance each time to avoid mutation issues when
   the config is shared across multiple places.
@@ -121,7 +121,7 @@ def get_unitree_go2w_robot_cfg() -> EntityCfg:
     init_state=INIT_STATE,
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
-    articulation=GO1_ARTICULATION,
+    articulation=B2_ARTICULATION,
   )
 
 if __name__ == "__main__":
@@ -129,6 +129,6 @@ if __name__ == "__main__":
 
   from mjlab.entity.entity import Entity
 
-  robot = Entity(get_unitree_go2w_robot_cfg())
+  robot = Entity(get_unitree_b2_robot_cfg())
 
   viewer.launch(robot.spec.compile())

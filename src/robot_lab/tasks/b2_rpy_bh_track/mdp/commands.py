@@ -28,6 +28,7 @@ class UniformRpyBaseHeightCommand(CommandTerm):
   def __init__(self, cfg: "UniformRpyBaseHeightCommandCfg", env: "ManagerBasedRlEnv"):
     super().__init__(cfg, env)
 
+    self.env = env
     self.robot: Entity = env.scene[cfg.entity_name]
     self._command = torch.zeros(self.num_envs, 4, device=self.device)
     self._desired_quat_w = torch.zeros(self.num_envs, 4, device=self.device)
@@ -65,12 +66,12 @@ class UniformRpyBaseHeightCommand(CommandTerm):
     roll = sample_uniform(*ranges.roll, (n,), device=self.device)
     pitch = sample_uniform(*ranges.pitch, (n,), device=self.device)
     yaw = sample_uniform(*ranges.yaw, (n,), device=self.device)
-    base_height = sample_uniform(*ranges.base_height, (n,), device=self.device)
+    base_height_offset = sample_uniform(*ranges.base_height_offset, (n,), device=self.device)
 
     self._command[env_ids, 0] = roll
     self._command[env_ids, 1] = pitch
     self._command[env_ids, 2] = yaw
-    self._command[env_ids, 3] = base_height
+    self._command[env_ids, 3] = base_height_offset + self.robot.data.default_root_state[env_ids, 2]
     self._desired_quat_w[env_ids] = quat_from_euler_xyz(roll, pitch, yaw)
 
   def _update_command(self) -> None:
@@ -81,36 +82,21 @@ class UniformRpyBaseHeightCommand(CommandTerm):
     if not env_indices:
       return
 
-    env_origins = self._env.scene.env_origins.cpu().numpy()
+    env_origins = self._env.scene.env_origins.cpu().numpy() # TODO：check if real still/init state of base_link is same as ideal state
     current_pos_ws = self.robot.data.root_link_pos_w.cpu().numpy()
+    current_pos_ws[:, 1] += 0.3  # offset the current position visualization for better visibility
+    current_rot_ws = matrix_from_quat(self.robot.data.root_link_quat_w).cpu().numpy()
     target_rot_ws = matrix_from_quat(self._desired_quat_w).cpu().numpy()
     cmds = self._command.cpu().numpy()
     frame_scale = self.cfg.viz.frame_scale
     axis_radius = self.cfg.viz.axis_radius * visualizer.meansize
-    sphere_radius = self.cfg.viz.target_sphere_radius * visualizer.meansize
-    column_radius = self.cfg.viz.height_column_radius * visualizer.meansize
     error_arrow_width = self.cfg.viz.error_arrow_width * visualizer.meansize
 
     for batch in env_indices:
       target_pos_w = env_origins[batch].copy()
+      target_pos_w[1] += 0.3
       target_pos_w[2] = cmds[batch, 3]
 
-      column_base = env_origins[batch].copy()
-      column_top = target_pos_w.copy()
-
-      visualizer.add_cylinder(
-        start=column_base,
-        end=column_top,
-        radius=column_radius,
-        color=self.cfg.viz.height_column_color,
-        label=f"target_height_column_{batch}",
-      )
-      visualizer.add_sphere(
-        center=target_pos_w,
-        radius=sphere_radius,
-        color=self.cfg.viz.target_sphere_color,
-        label=f"target_height_marker_{batch}",
-      )
       visualizer.add_frame(
         position=target_pos_w,
         rotation_matrix=target_rot_ws[batch],
@@ -121,7 +107,17 @@ class UniformRpyBaseHeightCommand(CommandTerm):
         label=f"target_pose_frame_{batch}",
       )
 
-      current_pos_w = current_pos_ws[batch]
+      current_pos_w = current_pos_ws[batch].copy()
+      visualizer.add_frame(
+        position=current_pos_w,
+        rotation_matrix=current_rot_ws[batch],
+        scale=frame_scale,
+        axis_radius=axis_radius,
+        alpha=float(self.cfg.viz.frame_alpha / 2.0), # TODO: does not work
+        axis_colors=tuple(self.cfg.viz.frame_axis_colors),
+        label=f"current_pose_frame_{batch}",
+      )
+
       if np.linalg.norm(current_pos_w - target_pos_w) > 1.0e-6:
         visualizer.add_arrow(
           start=current_pos_w,
@@ -136,26 +132,22 @@ class UniformRpyBaseHeightCommand(CommandTerm):
 class UniformRpyBaseHeightCommandCfg(CommandTermCfg):
   @dataclass
   class Ranges:
-    roll: tuple[float, float] = (-0.30, 0.30)
+    roll: tuple[float, float] = (-0.80, 0.80)
     pitch: tuple[float, float] = (-0.30, 0.30)
-    yaw: tuple[float, float] = (-0.60, 0.60)
-    base_height: tuple[float, float] = (0.52, 0.64)
+    yaw: tuple[float, float] = (-0.40, 0.40)
+    base_height_offset: tuple[float, float] = (0.2, 0.05)
 
   @dataclass
   class VizCfg:
-    frame_scale: float = 0.18
-    axis_radius: float = 0.08
-    frame_alpha: float = 0.9
-    target_sphere_radius: float = 0.22
-    height_column_radius: float = 0.06
-    error_arrow_width: float = 0.08
-    target_sphere_color: tuple[float, float, float, float] = (1.0, 0.55, 0.0, 0.45)
-    height_column_color: tuple[float, float, float, float] = (0.8, 0.8, 0.8, 0.25)
+    frame_scale: float = 0.3
+    axis_radius: float = 0.2
+    frame_alpha: float = 1.0
+    error_arrow_width: float = 0.2
     error_arrow_color: tuple[float, float, float, float] = (1.0, 0.2, 0.2, 0.65)
     frame_axis_colors: tuple[tuple[float, float, float], ...] = (
-      (1.0, 0.45, 0.45),
-      (0.45, 1.0, 0.45),
-      (0.45, 0.6, 1.0),
+      (1.0, 0.0, 0.0),
+      (0.0, 1.0, 0.0),
+      (0.0, 0.0, 1.0),
     )
 
   entity_name: str

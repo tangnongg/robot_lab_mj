@@ -15,7 +15,9 @@ from mjlab.scene import SceneCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
+
 from robot_lab.asset_zoo.robots import get_unitree_b2_robot_cfg
 
 from . import mdp
@@ -64,24 +66,34 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
       func=envs_mdp.generated_commands,
       params={"command_name": "base_pose"},
     ),
-    "pose_error": ObservationTermCfg(
-      func=mdp.pose_command_error,
-      params={"command_name": "base_pose"},
+    # TODO: untrust on hardware, add noise
+    # it doesn't exist in deploy/include/isaaclab/assets/articulation/articulation.h::ArticulationData
+    # for simple implementation, delete this term in  actor obs
+    # "base_lin_vel": ObservationTermCfg(func=envs_mdp.base_lin_vel),
+    "base_ang_vel": ObservationTermCfg(
+      func=envs_mdp.base_ang_vel,
+      noise=Unoise(n_min=-0.2, n_max=0.2),
     ),
-    "base_lin_vel": ObservationTermCfg(func=envs_mdp.base_lin_vel),
-    "base_ang_vel": ObservationTermCfg(func=envs_mdp.base_ang_vel),
+    "projected_gravity": ObservationTermCfg(
+      func=mdp.projected_gravity,
+      noise=Unoise(n_min=-0.05, n_max=0.05),
+    ),
     "joint_pos": ObservationTermCfg(
       func=envs_mdp.joint_pos_rel,
       params={"asset_cfg": joint_asset_cfg},
+      noise=Unoise(n_min=-0.01, n_max=0.01),
     ),
     "joint_vel": ObservationTermCfg(
       func=envs_mdp.joint_vel_rel,
       params={"asset_cfg": joint_asset_cfg},
+      noise=Unoise(n_min=-1.5, n_max=1.5),
     ),
     "actions": ObservationTermCfg(func=envs_mdp.last_action),
   }
   critic_terms = {
     **actor_terms,
+    "base_lin_vel": ObservationTermCfg(func=envs_mdp.base_lin_vel),
+    # TODO: projected gravity can present the orientation information, check if base_rpy is still necessary
     "base_rpy": ObservationTermCfg(func=mdp.base_rpy),
     "base_height": ObservationTermCfg(func=mdp.base_height),
   }
@@ -89,13 +101,13 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
   commands: dict[str, CommandTermCfg] = {
     "base_pose": UniformRpyBaseHeightCommandCfg(
       entity_name="robot",
-      resampling_time_range=(4.0, 6.0),
+      resampling_time_range=(0.5, 1.0),  # rapid
       debug_vis=True,
       ranges=UniformRpyBaseHeightCommandCfg.Ranges(
-        roll=(-0.30, 0.30),
+        roll=(-0.80, 0.80),
         pitch=(-0.30, 0.30),
-        yaw=(-0.60, 0.60),
-        base_height=(0.52, 0.64),
+        yaw=(-0.40, 0.40),
+        base_height_offset=(-0.2, 0.05),
       ),
     )
   }
@@ -113,30 +125,31 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
     ),
     "feet_contact_count_exp": RewardTermCfg(
       func=mdp.feet_contact_count_exp,
-      weight=0.25,
+      # weight=0.25,
+      weight=1.0,
       params={
         "sensor_name": "feet_ground_contact",
         "expected_contacts": 4,
-        "contact_threshold": 1.0,
+        "contact_threshold": 1.0,  # TODO: try smaller value
         "std": 1.0,
       },
     ),
-    "base_xy_position_l2": RewardTermCfg(
-      func=mdp.base_xy_position_l2,
-      weight=-0.5,
-    ),
-    "base_lin_vel_xy_l2": RewardTermCfg(
-      func=mdp.base_lin_vel_xy_l2,
-      weight=-1.0,
-    ),
-    "base_lin_vel_z_l2": RewardTermCfg(
-      func=mdp.base_lin_vel_z_l2,
-      weight=-2.0,
-    ),
-    "base_ang_vel_l2": RewardTermCfg(
-      func=mdp.base_ang_vel_l2,
-      weight=-0.05,
-    ),
+    # "base_xy_position_l2": RewardTermCfg(
+    #   func=mdp.base_xy_position_l2,
+    #   weight=-0.5,
+    # ),
+    # "base_lin_vel_xy_l2": RewardTermCfg(
+    #   func=mdp.base_lin_vel_xy_l2,
+    #   weight=-1.0,
+    # ),
+    # "base_lin_vel_z_l2": RewardTermCfg(
+    #   func=mdp.base_lin_vel_z_l2,
+    #   weight=-2.0,
+    # ),
+    # "base_ang_vel_l2": RewardTermCfg(
+    #   func=mdp.base_ang_vel_l2,
+    #   weight=-0.05,
+    # ),
     "joint_torques_l2": RewardTermCfg(
       func=envs_mdp.joint_torques_l2,
       weight=-2.5e-5,
@@ -160,6 +173,12 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
       func=mdp.undesired_contacts,
       weight=-1.0,
       params={"sensor_name": "nonfeet_ground_contact", "threshold": 1.0},
+    ),
+    "feet_slip": RewardTermCfg(
+      func=mdp.feet_slip,
+      # weight=-0.1,
+      weight=-1.0,
+      params={"sensor_name": "feet_ground_contact"},
     ),
   }
 
@@ -185,7 +204,7 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
       num_envs=1,
       extent=2.0,
     ),
-    episode_length_s=20.0,
+    episode_length_s=20.0,  # TODO:
     is_finite_horizon=False,
     scale_rewards_by_dt=True,
     observations={

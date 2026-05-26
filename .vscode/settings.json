@@ -22,5 +22,6 @@
         "**/__pycache__": true,
         "**/logs": true,
         "**/wandb": true
-    }
+    },
+    "cmake.sourceDirectory": "/home/tanglong/robot_lab_mj/simulate"
 }

@@ -1,0 +1,51 @@
+joint_ids_map: [3,4,5,0,1,2,9,10,11,6,7,8]
+step_dt: 0.02
+stiffness: [160, 160, 160, 160, 160, 160, 160, 160, 160, 160, 160, 160]
+damping:   [  5,   5,   5,   5,   5,   5,   5,   5,   5,   5,   5,   5]
+default_joint_pos: [-0.0,0.8,-1.5, 0.0,0.8,-1.5, -0.0,0.8,-1.5, 0.0,0.8,-1.5]
+
+commands:
+  base_pose:
+    ranges:
+      roll: [-0.80, 0.80]
+      pitch: [-0.30, 0.30]
+      yaw: [-0.40, 0.40]
+      base_height: [0.38, 0.63]
+actions:
+  JointPositionAction:
+    clip: null
+    joint_names: [.*]
+    scale: [0.15, 0.25, 0.25, 0.15, 0.25, 0.25, 0.15, 0.25, 0.25, 0.15, 0.25, 0.25]
+    offset: [-0.1,0.9,-1.8, 0.1,0.9,-1.8, -0.1,0.9,-1.8, 0.1,0.9,-1.8]
+    joint_ids: null
+observations:
+  ryp_bh_command:
+    params: { command_name: base_pose }
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0]
+    history_length: 1
+  base_ang_vel:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0]
+    history_length: 1
+  projected_gravity:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0]
+    history_length: 1  
+  joint_pos_rel:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    history_length: 1
+  joint_vel_rel:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    history_length: 1
+  last_action:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    history_length: 1

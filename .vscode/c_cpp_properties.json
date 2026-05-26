@@ -1,0 +1,55 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "compilerPath": "/usr/bin/g++",
+            "intelliSenseMode": "linux-gcc-x64",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "includePath": [
+                "${workspaceFolder}/deploy/include",
+                "${workspaceFolder}/deploy/robots/a2/include",
+                "${workspaceFolder}/deploy/robots/b2/include",
+                "${workspaceFolder}/deploy/robots/g1/include",
+                "${workspaceFolder}/deploy/robots/go2/include",
+                "${workspaceFolder}/deploy/thirdparty/cnpy",
+                "${workspaceFolder}/deploy/thirdparty/onnxruntime-linux-aarch64-1.22.0/include",
+                "${workspaceFolder}/deploy/thirdparty/onnxruntime-linux-x64-1.22.0/include",
+                "${workspaceFolder}/mujoco/include",
+                "${workspaceFolder}/mujoco/simulate",
+                "${workspaceFolder}/simulate/src",
+                "${workspaceFolder}/src",
+                "/opt/unitree_robotics/include",
+                "/opt/unitree_robotics/include/ddscxx",
+                "/opt/cyclonedds/include",
+                "/usr/local/include",
+                "/usr/local/include/ddscxx",
+                "/usr/local/include/iceoryx/v2.0.2",
+                "/usr/include/eigen3"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/deploy/include",
+                    "${workspaceFolder}/deploy/robots/a2/include",
+                    "${workspaceFolder}/deploy/robots/b2/include",
+                    "${workspaceFolder}/deploy/robots/g1/include",
+                    "${workspaceFolder}/deploy/robots/go2/include",
+                    "${workspaceFolder}/deploy/thirdparty/cnpy",
+                    "${workspaceFolder}/mujoco/include",
+                    "${workspaceFolder}/mujoco/simulate",
+                    "${workspaceFolder}/simulate/src",
+                    "${workspaceFolder}/src",
+                    "/opt/unitree_robotics/include",
+                    "/opt/unitree_robotics/include/ddscxx",
+                    "/opt/cyclonedds/include",
+                    "/usr/local/include",
+                    "/usr/local/include/ddscxx",
+                    "/usr/local/include/iceoryx/v2.0.2",
+                    "/usr/include/eigen3"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}

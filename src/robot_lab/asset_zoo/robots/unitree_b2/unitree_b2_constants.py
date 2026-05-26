@@ -59,10 +59,9 @@ B2_ACTUATOR_CALF = DcMotorActuatorCfg(
 INIT_STATE = EntityCfg.InitialStateCfg(
   pos=(0.0, 0.0, 0.58),
   joint_pos={
-    ".*L_hip_joint": 0.0,
+    ".*L_hip_joint": 0.0, # hip mirror
     ".*R_hip_joint": -0.0,
-    "F.*_thigh_joint": 0.8,
-    "R.*_thigh_joint": 0.8,
+    ".*_thigh_joint": 0.8,
     ".*_calf_joint": -1.5,
   },
   joint_vel={".*": 0.0},

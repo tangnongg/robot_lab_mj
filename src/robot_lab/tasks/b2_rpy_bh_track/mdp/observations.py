@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 import torch
-
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import euler_xyz_from_quat, wrap_to_pi
@@ -39,7 +38,9 @@ def pose_command_error(
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
   asset: Entity = env.scene[asset_cfg.name]
-  command = cast(UniformRpyBaseHeightCommand, env.command_manager.get_term(command_name))
+  command = cast(
+    UniformRpyBaseHeightCommand, env.command_manager.get_term(command_name)
+  )
 
   roll, pitch, yaw = euler_xyz_from_quat(asset.data.root_link_quat_w)
   rpy_error = torch.stack((roll, pitch, yaw), dim=-1) - command.command[:, :3]

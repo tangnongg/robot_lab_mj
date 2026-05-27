@@ -101,7 +101,7 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
   commands: dict[str, CommandTermCfg] = {
     "base_pose": UniformRpyBaseHeightCommandCfg(
       entity_name="robot",
-      resampling_time_range=(0.5, 1.0),  # rapid
+      resampling_time_range=(0.01, 10.0),  # rapid
       debug_vis=True,
       ranges=UniformRpyBaseHeightCommandCfg.Ranges(
         roll=(-0.80, 0.80),

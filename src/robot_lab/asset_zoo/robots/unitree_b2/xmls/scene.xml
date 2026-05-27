@@ -1,6 +1,16 @@
 <mujoco model="b2 scene">
   <include file="b2.xml"/>
 
+  <!-- <option noslip_iterations="3" 
+          noslip_tolerance="0" 
+  />
+   -->
+  <option noslip_iterations="3" 
+          noslip_tolerance="0" 
+          cone="elliptic" 
+          impratio="100" 
+  />
+
   <statistic center="0 0 0.1" extent="0.8"/>
 
   <visual>

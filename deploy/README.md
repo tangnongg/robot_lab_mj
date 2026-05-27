@@ -36,6 +36,15 @@ mkdir build && cd build
 cmake .. && make
 ```
 
+重新build并执行
+
+```bash
+cd .. && rm -rf build
+mkdir build && cd build
+cmake .. && make -j8
+./b2_ctrl --network=lo
+```
+
 ```bash
 cd /home/tanglong/robot_lab_mj/deploy/robots/b2/build && ./b2_ctrl --network=lo
 ```

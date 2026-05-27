@@ -15,14 +15,34 @@ REGISTER_OBSERVATION(ryp_bh_command)
 {
     std::vector<float> obs(4);
     auto joystick = env->robot->data.joystick;
-    // const auto cfg = params["command_name"].as<std::string>();
-    const auto cfg = env->cfg["commands"]["base_pose"]["ranges"];
+    // const auto cfg = params["command_name"].as<std::string>(); # avaliable way to get params
+    const auto cfg = env->cfg["commands"]["base_pose"]["offset_ranges"];
     // roll, pitch, yaw, base_height
-    obs[0] = std::clamp(joystick->lx(), cfg["roll"][0].as<float>(), cfg["roll"][1].as<float>());
-    obs[1] = std::clamp(joystick->ly(), cfg["pitch"][0].as<float>(), cfg["pitch"][1].as<float>());
-    obs[2] = std::clamp(joystick->rx(), cfg["yaw"][0].as<float>(), cfg["yaw"][1].as<float>());
-    obs[3] = std::clamp(joystick->ry(), cfg["base_height"][0].as<float>(), cfg["base_height"][1].as<float>());
-    std::cout << "command obs: " << obs[0] << " " << obs[1] << " " << obs[2] << " " << obs[3] << std::endl;
+    if (joystick->lx() < 0) {
+        obs[0] = -joystick->lx() * cfg["roll_offset"][0].as<float>();
+    }
+    else {
+        obs[0] = joystick->lx() * cfg["roll_offset"][1].as<float>();
+    }
+    if (joystick->ly() < 0) {
+        obs[1] = -joystick->ly() * cfg["pitch_offset"][0].as<float>();
+    }
+    else {
+        obs[1] = joystick->ly() * cfg["pitch_offset"][1].as<float>();
+    }
+    if (joystick->rx() < 0) {
+        obs[2] = -joystick->rx() * cfg["yaw_offset"][0].as<float>();
+    }
+    else {
+        obs[2] = joystick->rx() * cfg["yaw_offset"][1].as<float>();
+    }
+    if (joystick->ry() < 0) {
+        obs[3] = -joystick->ry() * cfg["base_height_offset"][0].as<float>() + 0.58;
+    }
+    else {
+        obs[3] = joystick->ry() * cfg["base_height_offset"][1].as<float>() + 0.58;
+    }
+    std::cout << "ryp_bh_command: " << obs[0] << " " << obs[1] << " " << obs[2] << " " << obs[3] << std::endl;
     return obs;
 }
 

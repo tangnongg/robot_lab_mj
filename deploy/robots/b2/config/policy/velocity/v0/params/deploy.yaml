@@ -6,11 +6,11 @@ default_joint_pos: [-0.0,0.8,-1.5, 0.0,0.8,-1.5, -0.0,0.8,-1.5, 0.0,0.8,-1.5]
 
 commands:
   base_pose:
-    ranges:
-      roll: [-0.80, 0.80]
-      pitch: [-0.30, 0.30]
-      yaw: [-0.40, 0.40]
-      base_height: [0.38, 0.63]
+    offset_ranges:
+      roll_offset: [-0.80, 0.80]
+      pitch_offset: [-0.30, 0.30]
+      yaw_offset: [-0.40, 0.40]
+      base_height_offset: [-0.20, 0.05]
 actions:
   JointPositionAction:
     clip: null

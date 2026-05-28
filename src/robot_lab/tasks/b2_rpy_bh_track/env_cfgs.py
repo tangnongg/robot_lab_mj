@@ -101,7 +101,7 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
   commands: dict[str, CommandTermCfg] = {
     "base_pose": UniformRpyBaseHeightCommandCfg(
       entity_name="robot",
-      resampling_time_range=(0.01, 10.0),  # rapid
+      resampling_time_range=(0.01, 10.0),  # rapidly changed and long-lasting commands
       debug_vis=True,
       ranges=UniformRpyBaseHeightCommandCfg.Ranges(
         roll=(-0.80, 0.80),
@@ -111,6 +111,8 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
       ),
     )
   }
+
+  site_names = ("FL", "FR", "RL", "RR")
 
   rewards = {
     "track_base_orientation_exp": RewardTermCfg(
@@ -134,14 +136,14 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
         "std": 1.0,
       },
     ),
-    # "base_xy_position_l2": RewardTermCfg(
-    #   func=mdp.base_xy_position_l2,
-    #   weight=-0.5,
-    # ),
-    # "base_lin_vel_xy_l2": RewardTermCfg(
-    #   func=mdp.base_lin_vel_xy_l2,
-    #   weight=-1.0,
-    # ),
+    "base_xy_position_l2": RewardTermCfg(
+      func=mdp.base_xy_position_l2,
+      weight=-0.5,
+    ),
+    "base_lin_vel_xy_l2": RewardTermCfg(
+      func=mdp.base_lin_vel_xy_l2,
+      weight=-1.0,
+    ),
     # "base_lin_vel_z_l2": RewardTermCfg(
     #   func=mdp.base_lin_vel_z_l2,
     #   weight=-2.0,
@@ -167,7 +169,7 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
     ),
     "action_rate_l2": RewardTermCfg(
       func=envs_mdp.action_rate_l2,
-      weight=-0.01,
+      weight=-0.10,
     ),
     "undesired_contacts": RewardTermCfg(
       func=mdp.undesired_contacts,
@@ -178,7 +180,15 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
       func=mdp.feet_slip,
       # weight=-0.1,
       weight=-1.0,
-      params={"sensor_name": "feet_ground_contact"},
+      params={
+        "sensor_name": "feet_ground_contact",
+        "asset_cfg": SceneEntityCfg("robot", site_names=site_names),
+      },
+    ),
+    "variable_near_default_position": RewardTermCfg(
+      func=mdp.variable_near_default_position,
+      weight=-0.1,  # 1.0 is too large
+      params={"asset_cfg": joint_asset_cfg, "std": 1.0},
     ),
   }
 
@@ -312,5 +322,7 @@ def unitree_b2_flat_rpy_bh_track_env_cfg(
   if play:
     cfg.episode_length_s = int(1e9)
     cfg.events.pop("push_robot", None)
+    cfg.events.pop("randomize_reset_joints", None)
+    cfg.events.pop("randomize_reset_base", None)
 
   return cfg

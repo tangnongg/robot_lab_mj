@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 import torch
-
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
@@ -24,7 +23,9 @@ def track_base_orientation_exp(
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
   asset: Entity = env.scene[asset_cfg.name]
-  command = cast(UniformRpyBaseHeightCommand, env.command_manager.get_term(command_name))
+  command = cast(
+    UniformRpyBaseHeightCommand, env.command_manager.get_term(command_name)
+  )
   error = quat_error_magnitude(command.desired_quat_w, asset.data.root_link_quat_w)
   return torch.exp(-(error**2) / (std**2))
 
@@ -36,7 +37,9 @@ def track_base_height_exp(
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
   asset: Entity = env.scene[asset_cfg.name]
-  command = cast(UniformRpyBaseHeightCommand, env.command_manager.get_term(command_name))
+  command = cast(
+    UniformRpyBaseHeightCommand, env.command_manager.get_term(command_name)
+  )
   error = asset.data.root_link_pos_w[:, 2] - command.command[:, 3]
   return torch.exp(-(error**2) / (std**2))
 
@@ -110,6 +113,7 @@ def undesired_contacts(
 
   return contact.float().sum(dim=1)
 
+
 def feet_slip(
   env: ManagerBasedRlEnv,
   sensor_name: str,
@@ -121,6 +125,9 @@ def feet_slip(
   assert contact_sensor.data.found is not None
   in_contact = (contact_sensor.data.found > 0).float()  # [B, N]
   foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]  # [B, N, 2]
+  # print("asset_cfg.site_ids isssss", asset_cfg.site_ids)
+  # print("foot_vel_xy shape isssss", foot_vel_xy.shape)
+  # print("foot_vel_xy isssss", foot_vel_xy)
   vel_xy_norm = torch.norm(foot_vel_xy, dim=-1)  # [B, N]
   vel_xy_norm_sq = torch.square(vel_xy_norm)  # [B, N]
   cost = torch.sum(vel_xy_norm_sq * in_contact, dim=1)
@@ -130,3 +137,38 @@ def feet_slip(
   )
   env.extras["log"]["Metrics/slip_velocity_mean"] = mean_slip_vel
   return cost
+
+
+def variable_near_default_position(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  std: float = 1.0,
+) -> torch.Tensor:
+  asset: Entity = env.scene[asset_cfg.name]
+  delta_pos = asset.data.joint_pos - asset.data.default_joint_pos
+  error_norm_l2 = torch.norm(delta_pos, p=2, dim=1)
+
+  cmd = env.command_manager.get_command("base_pose")
+  assert cmd is not None
+
+  default_z = asset.data.default_root_state[:, 2]
+  height_delta = cmd[:, 3] - default_z
+
+  height_scale = torch.where(
+    height_delta < 0.0,
+    torch.full_like(height_delta, 0.20),
+    torch.full_like(height_delta, 0.05),
+  )
+
+  delta_cmd = torch.stack(
+    (
+      cmd[:, 0] / 0.80,
+      cmd[:, 1] / 0.30,
+      cmd[:, 2] / 0.40,
+      height_delta / height_scale,
+    ),
+    dim=1,
+  )
+  delta_cmd_norm_l2 = torch.norm(delta_cmd, dim=1)
+  scale = torch.exp(-(delta_cmd_norm_l2**2) / (std**2))
+  return error_norm_l2 * scale

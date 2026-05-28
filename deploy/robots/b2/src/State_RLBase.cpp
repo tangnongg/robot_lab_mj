@@ -42,7 +42,7 @@ REGISTER_OBSERVATION(ryp_bh_command)
     else {
         obs[3] = joystick->ry() * cfg["base_height_offset"][1].as<float>() + 0.58;
     }
-    std::cout << "ryp_bh_command: " << obs[0] << " " << obs[1] << " " << obs[2] << " " << obs[3] << std::endl;
+    // std::cout << "ryp_bh_command: " << obs[0] << " " << obs[1] << " " << obs[2] << " " << obs[3] << std::endl;
     return obs;
 }
 

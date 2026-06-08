@@ -3,12 +3,20 @@
 Five variants — ground, platform, wall, slope, prone — each with train and
 play modes.  All share the same core structure; variants differ only in
 initial pose, reward weights, phase thresholds, and traction-force settings.
+
+Matches the official HoST implementation:
+- Relative joint position control (target = current_pos + action)
+- Actions & observations zeroed during unactuated period
+- PD stiffness matching official legged_gym config
+- Joint reset range 0.5–1.5 × default
 """
 
 from __future__ import annotations
 
 import numpy as np
 import torch
+from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -26,9 +34,13 @@ from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
-from mjlab.entity import EntityCfg
-
 from robot_lab.asset_zoo.robots.unitree_g1.g1_constants import (
+    G1_ACTUATOR_4010,
+    G1_ACTUATOR_5020,
+    G1_ACTUATOR_7520_14,
+    G1_ACTUATOR_7520_22,
+    G1_ACTUATOR_ANKLE,
+    G1_ACTUATOR_WAIST,
     get_g1_robot_cfg,
 )
 
@@ -36,8 +48,101 @@ from . import mdp
 
 
 # ---------------------------------------------------------------------------
-# Helper — robot scene entity config for all joints
+# Official-PD-gain actuator overrides
 # ---------------------------------------------------------------------------
+# The mjlab G1 actuators are derived from electric motor parameters (armature,
+# reflected inertia, natural frequency), which yields physically realistic but
+# lower PD gains than the official HoST implementation.  We override stiffness
+# and damping to match the official legged_gym config while keeping the
+# original armature and effort_limit.
+#
+# Official mapping (by substring match):
+#   hip     → 150 N·m/rad,   4 N·m·s/rad
+#   knee    → 200 N·m/rad,   6 N·m·s/rad
+#   ankle   →  40 N·m/rad,   2 N·m·s/rad
+#   shoulder→ 100 N·m/rad,   4 N·m·s/rad
+#   elbow   → 100 N·m/rad,   4 N·m·s/rad
+#   waist   → 100 N·m/rad,   4 N·m·s/rad
+#   wrist   → 100 N·m/rad,   4 N·m·s/rad
+
+
+def _override_stiffness_damping(
+    base: BuiltinPositionActuatorCfg,
+    stiffness: float,
+    damping: float,
+) -> BuiltinPositionActuatorCfg:
+    """Return a copy of *base* with overridden stiffness and damping."""
+    return BuiltinPositionActuatorCfg(
+        target_names_expr=base.target_names_expr,
+        transmission_type=base.transmission_type,
+        armature=base.armature,
+        frictionloss=base.frictionloss,
+        viscous_damping=base.viscous_damping,
+        delay_min_lag=base.delay_min_lag,
+        delay_max_lag=base.delay_max_lag,
+        delay_hold_prob=base.delay_hold_prob,
+        delay_update_period=base.delay_update_period,
+        delay_per_env_phase=base.delay_per_env_phase,
+        stiffness=stiffness,
+        damping=damping,
+        effort_limit=base.effort_limit,
+    )
+
+
+# Split actuator groups to match the official per-joint-group PD gains.
+# G1_ACTUATOR_7520_14 → "hip" (hip_pitch/hip_yaw) vs "waist" (waist_yaw)
+_G1_ACTUATOR_HIP = BuiltinPositionActuatorCfg(
+    target_names_expr=(".*_hip_pitch_joint", ".*_hip_yaw_joint"),
+    stiffness=150.0,
+    damping=4.0,
+    armature=G1_ACTUATOR_7520_14.armature,
+    effort_limit=G1_ACTUATOR_7520_14.effort_limit,
+)
+_G1_ACTUATOR_WAIST_YAW = BuiltinPositionActuatorCfg(
+    target_names_expr=("waist_yaw_joint",),
+    stiffness=100.0,
+    damping=4.0,
+    armature=G1_ACTUATOR_7520_14.armature,
+    effort_limit=G1_ACTUATOR_7520_14.effort_limit,
+)
+# G1_ACTUATOR_7520_22 → "hip" (hip_roll) vs "knee"
+_G1_ACTUATOR_HIP_ROLL = BuiltinPositionActuatorCfg(
+    target_names_expr=(".*_hip_roll_joint",),
+    stiffness=150.0,
+    damping=4.0,
+    armature=G1_ACTUATOR_7520_22.armature,
+    effort_limit=G1_ACTUATOR_7520_22.effort_limit,
+)
+_G1_ACTUATOR_KNEE = BuiltinPositionActuatorCfg(
+    target_names_expr=(".*_knee_joint",),
+    stiffness=200.0,
+    damping=6.0,
+    armature=G1_ACTUATOR_7520_22.armature,
+    effort_limit=G1_ACTUATOR_7520_22.effort_limit,
+)
+# G1_ACTUATOR_5020 → all become 100/4 (shoulder, elbow, wrist_roll)
+_G1_ACTUATOR_UPPER = _override_stiffness_damping(G1_ACTUATOR_5020, 100.0, 4.0)
+# G1_ACTUATOR_4010 → wrist_pitch/yaw → 100/4
+_G1_ACTUATOR_WRIST = _override_stiffness_damping(G1_ACTUATOR_4010, 100.0, 4.0)
+# G1_ACTUATOR_WAIST → waist_pitch/roll → 100/4
+_G1_ACTUATOR_WAIST_PITCH_ROLL = _override_stiffness_damping(G1_ACTUATOR_WAIST, 100.0, 4.0)
+# G1_ACTUATOR_ANKLE → 40/2
+_G1_ACTUATOR_ANKLE_OFFICIAL = _override_stiffness_damping(G1_ACTUATOR_ANKLE, 40.0, 2.0)
+
+
+_G1_ARTICULATION_OFFICIAL = EntityArticulationInfoCfg(
+    actuators=(
+        _G1_ACTUATOR_UPPER,
+        _G1_ACTUATOR_HIP,
+        _G1_ACTUATOR_WAIST_YAW,
+        _G1_ACTUATOR_HIP_ROLL,
+        _G1_ACTUATOR_KNEE,
+        _G1_ACTUATOR_WRIST,
+        _G1_ACTUATOR_WAIST_PITCH_ROLL,
+        _G1_ACTUATOR_ANKLE_OFFICIAL,
+    ),
+    soft_joint_pos_limit_factor=0.9,
+)
 
 _JOINT_ASSET_CFG = SceneEntityCfg("robot", joint_names=(".*_joint",))
 
@@ -86,34 +191,35 @@ def _make_nonfeet_contact_sensor() -> ContactSensorCfg:
 
 
 def _build_actor_obs() -> dict[str, ObservationTermCfg]:
-    """Actor observation terms matching the original Isaac Lab policy group."""
+    """Actor observation terms matching the official HoST policy group.
+
+    Uses custom wrappers that zero observations during the unactuated period
+    (first *unactuated_steps* env steps).
+    """
+    # Noise and scale are handled inside the wrapper functions
+    # (so they are applied BEFORE the unactuated zero-gating, matching
+    # the official HoST order).  Do NOT set noise/scale on the cfg.
     return {
         "base_ang_vel": ObservationTermCfg(
-            func=envs_mdp.base_ang_vel,
-            scale=0.25,
-            noise=Unoise(n_min=-0.05, n_max=0.05),
+            func=mdp.base_ang_vel,
             clip=(-50.0, 50.0),
         ),
         "projected_gravity": ObservationTermCfg(
-            func=envs_mdp.projected_gravity,
-            noise=Unoise(n_min=-0.05, n_max=0.05),
+            func=mdp.projected_gravity,
             clip=(-10.0, 10.0),
         ),
         "joint_pos": ObservationTermCfg(
-            func=envs_mdp.joint_pos_rel,
+            func=mdp.joint_pos,
             params={"asset_cfg": _JOINT_ASSET_CFG},
-            noise=Unoise(n_min=-0.01, n_max=0.01),
             clip=(-20.0, 20.0),
         ),
         "joint_vel": ObservationTermCfg(
-            func=envs_mdp.joint_vel_rel,
+            func=mdp.joint_vel,
             params={"asset_cfg": _JOINT_ASSET_CFG},
-            scale=0.05,
-            noise=Unoise(n_min=-0.075, n_max=0.075),
             clip=(-50.0, 50.0),
         ),
         "actions": ObservationTermCfg(
-            func=envs_mdp.last_action,
+            func=mdp.last_action,
             clip=(-50.0, 50.0),
         ),
         "action_rescale": ObservationTermCfg(
@@ -124,11 +230,10 @@ def _build_actor_obs() -> dict[str, ObservationTermCfg]:
 
 
 def _build_critic_obs() -> dict[str, ObservationTermCfg]:
-    """Critic observation = actor terms + extra privileged information."""
+    """Critic observation = actor terms + full projected gravity (privileged)."""
     return {
         **_build_actor_obs(),
-        # Full projected gravity (not just the policy-scoped subset)
-        "projected_gravity_full": ObservationTermCfg(func=envs_mdp.projected_gravity),
+        "projected_gravity_full": ObservationTermCfg(func=mdp.projected_gravity),
     }
 
 
@@ -179,7 +284,7 @@ def _build_rewards(
             func=mdp.reward_joint_tracking_error, weight=-0.00025
         ),
         "regu_dof_pos_limits": RewardTermCfg(
-            func=mdp.reward_dof_pos_limits, weight=-5.0
+            func=mdp.reward_dof_pos_limits, weight=-100.0
         ),
         "regu_dof_vel_limits": RewardTermCfg(
             func=mdp.reward_dof_vel_limits, weight=-1.0
@@ -287,7 +392,7 @@ def _build_events(
             func=envs_mdp.reset_joints_by_offset,
             mode="reset",
             params={
-                "position_range": (0.9, 1.1),
+                "position_range": (0.5, 1.5),
                 "velocity_range": (0.0, 0.0),
                 "asset_cfg": _JOINT_ASSET_CFG,
             },
@@ -361,7 +466,7 @@ def unitree_g1_host_env_cfg(
             joint_vel=dict(base_robot_cfg.init_state.joint_vel),
         ),
         spec_fn=base_robot_cfg.spec_fn,
-        articulation=base_robot_cfg.articulation,
+        articulation=_G1_ARTICULATION_OFFICIAL,
         collisions=base_robot_cfg.collisions,
         sort_actuators=base_robot_cfg.sort_actuators,
     )
@@ -411,11 +516,11 @@ def unitree_g1_host_env_cfg(
             ),
         },
         actions={
-            "joint_pos": JointPositionActionCfg(
+            "joint_pos": mdp.RelativeJointPositionActionCfg(
                 entity_name="robot",
                 actuator_names=(".*",),
                 scale=1.0,
-                use_default_offset=True,
+                unactuated_steps=unactuated_steps,
                 clip={r".*": (-100.0, 100.0)},
             )
         },

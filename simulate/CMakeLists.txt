@@ -18,8 +18,9 @@ include_directories(
   mujoco/include
   mujoco/simulate
   src/lodepng
+  /opt/unitree_robotics/include
 )
-link_directories(mujoco/lib)
+link_directories(mujoco/lib /opt/unitree_robotics/lib)
 
 file(GLOB SIM_SRC
   src/joystick/joystick.cc

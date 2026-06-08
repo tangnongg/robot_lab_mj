@@ -23,7 +23,7 @@
         "**/logs": true,
         "**/wandb": true
     },
-    "cmake.sourceDirectory": "/home/tanglong/robot_lab_mj/simulate",
+    "cmake.sourceDirectory": "/home/tangl/myProj/robot_lab_mj/simulate",
     "ROS2.distro": "jazzy",
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda"

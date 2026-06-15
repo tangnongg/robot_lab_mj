@@ -15,3 +15,5 @@ wandb/
 draft.txt
 train_task_help.txt
 mujoco_warp/
+
+data/

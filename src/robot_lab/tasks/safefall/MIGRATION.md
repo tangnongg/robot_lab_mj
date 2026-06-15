@@ -7,6 +7,10 @@ This document describes the migration of the SafeFall protective control trainin
 **Source**: `/home/tangl/myProj/safefall_isaaclab` (conda env: `env_isaaclab`)
 **Target**: `/home/tangl/myProj/robot_lab_mj/src/robot_lab/tasks/safefall` (conda env: `env_mjlab_e`)
 
+> **Note**: The **Fall Predictor** (GRU-based binary classifier, paper §III-C) has been
+> implemented from scratch in `fall_predictor/`. See [FALL_PREDICTOR.md](FALL_PREDICTOR.md)
+> for full documentation. The original IsaacLab project did not include this component.
+
 **Task ID**: `Mjlab-SafeFall-G1`
 
 ---

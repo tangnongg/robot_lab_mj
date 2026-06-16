@@ -81,17 +81,29 @@ class TrajectoryWriter:
         writer.save(output_dir / "traj_0001.pt")
     """
 
-    def __init__(self, env: object | None = None) -> None:
+    def __init__(self, env: object | None = None, env_idx: int = 0) -> None:
         self._frames: list[torch.Tensor] = []
         self._env = env
+        self._env_idx = env_idx
 
     def add(self) -> None:
-        """Add one frame by extracting 63-D predictor input from entity data."""
-        x = extract_predictor_input(self._env).cpu()
-        # TODO：后续改为多env并行采集
+        """Add one frame by extracting 63-D predictor input from entity data.
+
+        For multi‑env collection prefer ``add_from_batch`` which extracts
+        once for all envs instead of N separate GPU allocations.
+        """
+        x = extract_predictor_input(self._env).detach().cpu()  # (B, 63)
         if x.dim() == 2:
-            x = x[0]  # take first env
+            x = x[self._env_idx].clone()
         self._frames.append(x)
+
+    def add_from_batch(self, batch: torch.Tensor) -> None:
+        """Add a frame from a pre-extracted (B, 63) CPU tensor.
+
+        *batch* must already be on CPU and detached.  This avoids N
+        redundant GPU→CPU transfers when collecting with many envs.
+        """
+        self._frames.append(batch[self._env_idx].clone())
 
     def __len__(self) -> int:
         return len(self._frames)

@@ -444,18 +444,23 @@ def collect_trajectories(
             break
 
         # --- Action selection (batched) ---
-        policy_obs = {k: v.to(device) for k, v in obs_dict.items()
-                      if k in ("actor", "critic")}
-        # Per‑env sensor noise.
-        noise_scale = torch.tensor(
-            [s.pert.sensor_noise_scale for s in states],
-            device=device).view(N, 1)
-        noise_mask = (noise_scale > 1.0).float()
-        actor_obs = policy_obs["actor"]
-        noise = torch.randn_like(actor_obs) * 0.01 * noise_scale * noise_mask
-        policy_obs["actor"] = actor_obs + noise
+        # torch.no_grad() is CRITICAL here: without it, autograd builds a
+        # computation graph through the policy network (parameters have
+        # requires_grad=True).  Intermediate activations and graph nodes
+        # accumulate on GPU each step and are never freed, causing OOM.
+        with torch.no_grad():
+            policy_obs = {k: v.to(device) for k, v in obs_dict.items()
+                          if k in ("actor", "critic")}
+            # Per‑env sensor noise.
+            noise_scale = torch.tensor(
+                [s.pert.sensor_noise_scale for s in states],
+                device=device).view(N, 1)
+            noise_mask = (noise_scale > 1.0).float()
+            actor_obs = policy_obs["actor"]
+            noise = torch.randn_like(actor_obs) * 0.01 * noise_scale * noise_mask
+            policy_obs["actor"] = actor_obs + noise
 
-        actions = policy_fn(policy_obs)  # (N, 29)
+            actions = policy_fn(policy_obs)  # (N, 29)
 
         # Per‑env FIFO delay.  Store only CPU copies in the queue;
         # the GPU action tensor is reused in-place each step.
@@ -585,6 +590,17 @@ def collect_trajectories(
                 s.init_h = asset.data.root_link_pos_w[i, 2].item()
             del frame_batch_r
             _sync_viewer()
+
+            # Release cached GPU memory back to the OS after each batch
+            # of trajectory saves.  Without this, PyTorch's CUDA caching
+            # allocator holds freed memory indefinitely; over thousands of
+            # trajectories the cached-but-unused memory causes OOM.
+            if device != "cpu":
+                torch.cuda.empty_cache()
+
+        # --- Explicit per‑iteration GPU cleanup: drop Python references
+        # so the allocator can reuse the underlying CUDA memory chunks.
+        del policy_obs, noise_scale, noise_mask, noise, actor_obs
 
         # --- Checkpoints & progress ---
         if stats.saved_trajs > 0 and stats.saved_trajs % checkpoint_interval == 0:

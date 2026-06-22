@@ -26,5 +26,13 @@
     "cmake.sourceDirectory": "/home/tangl/myProj/robot_lab_mj/simulate",
     "ROS2.distro": "jazzy",
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "spellright.language": [
+        "en-US-10-1."
+    ],
+    "spellright.documentTypes": [
+        "latex",
+        "plaintext",
+        "markdown"
+    ]
 }

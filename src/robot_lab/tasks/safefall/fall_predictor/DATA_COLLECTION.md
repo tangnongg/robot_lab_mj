@@ -63,7 +63,7 @@ python -m robot_lab.tasks.safefall.fall_predictor.collect_data \
 python -m robot_lab.tasks.safefall.fall_predictor.collect_data \
     --output data/fall_trajs \
     --num-trajs 81920 \
-    --num-envs 4096 \
+    --num-envs 1024 \
     --policy-checkpoint logs/rsl_rl/g1_velocity/2026-06-11_01-03-02/model_1999.pt \
     --device cuda:0
 ```

@@ -1,6 +1,6 @@
 """Lightweight GRU-based fall predictor — paper §III-C.
 
-Architecture (paper exact):
+Architecture:
   - Input:  s_t = {r_t, ω_t, q_t, q̇_t}  (63 dims)
     - r_t   pelvis roll, pitch (world frame) ................. 2
     - ω_t   base angular velocity ............................. 3

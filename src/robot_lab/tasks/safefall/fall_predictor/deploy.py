@@ -108,7 +108,7 @@ class FallPredictorWrapper:
         is_falling : bool
             True if a fall has been detected (latched until :meth:`reset`).
         probability : float
-            Current falling probability (0–1).
+            Current falling probability (0-1).
         """
         self._step_count += 1
 
@@ -127,7 +127,9 @@ class FallPredictorWrapper:
         if self._step_count <= self.warmup_steps:
             return False, self._last_prob
 
-        # Hysteresis: require consecutive positive predictions.
+        # Leaky integrator / Leaky counter hysteresis:
+        # Increment if above threshold, decrement (leaks) if below.
+        # This acts as a low-pass filter to tolerate transient noise/drops.
         if self._last_prob > self.threshold:
             self._consecutive_falling += 1
         else:
@@ -150,7 +152,8 @@ class FallPredictorWrapper:
 
     @property
     def lead_time_steps(self) -> int:
-        """Approximate lead time in steps (since first detection)."""
+        """Approximate lead time in steps (since falling detected)."""
+        # TODO：实现和注释不符合，实现注释功能：论文中提到的 Lead Time（前置导引时间） 是指：从算法检测到摔倒（拉响警报），到机器人真正不可挽回地砸到地面（发生物理撞击）之间的时间差。 这个时间越长，留给防摔倒策略（SafeFall）做准备的时间就越充裕（论文中写道平均有 410 毫秒）。】
         if not self._is_falling:
             return 0
         return self._consecutive_falling

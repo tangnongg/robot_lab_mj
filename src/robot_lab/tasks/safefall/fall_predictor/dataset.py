@@ -13,14 +13,13 @@ Paper §III-C segmentation:
 
 from __future__ import annotations
 
-import json
 import random
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, IterableDataset
+from torch.utils.data import IterableDataset
 
 from .model import INPUT_DIM, extract_predictor_input
 
@@ -134,72 +133,6 @@ def load_trajectory(path: str | Path) -> dict[str, torch.Tensor]:
 
 
 # ---------------------------------------------------------------------------
-# PyTorch Dataset (in-memory, for small / medium collections)
-# ---------------------------------------------------------------------------
-
-class FallTrajectoryDataset(Dataset):
-    """Dataset that yields individual timesteps from a collection of
-    trajectories, skipping ambiguous frames.
-
-    Each item is ``(observation, label)`` where *observation* has shape
-    ``(63,)`` and *label* is 0 (safe) or 1 (falling).
-    """
-
-    def __init__(
-        self,
-        data_dir: str | Path | list[str] | list[Path],
-        balance: bool = True,
-        seed: int = 42,
-    ):
-        if isinstance(data_dir, list):
-            self.files = [Path(f) for f in data_dir]
-        else:
-            data_dir = Path(data_dir)
-            self.files = sorted(data_dir.glob("*.pt"))
-        if not self.files:
-            raise FileNotFoundError(
-                f"No .pt trajectory files found in {data_dir}"
-            )
-
-        # Load all into memory (acceptable for ≤ 100 K trajectories
-        # since each is ~ T×63 floats ≈ few KB).
-        all_obs: list[torch.Tensor] = []
-        all_labels: list[torch.Tensor] = []
-        for f in self.files:
-            d = load_trajectory(f)
-            labels = d["labels"]
-            obs = d["observations"]
-            # Keep only non-ambiguous frames.
-            keep = labels >= 0
-            all_obs.append(obs[keep])
-            all_labels.append(labels[keep])
-
-        self.observations = torch.cat(all_obs)       # (total_frames, 63)
-        self.labels = torch.cat(all_labels).long()    # (total_frames,)
-
-        # Optional class balancing: downsample majority class.
-        if balance:
-            rng = random.Random(seed)
-            safe_idx = (self.labels == 0).nonzero(as_tuple=True)[0]
-            fall_idx = (self.labels == 1).nonzero(as_tuple=True)[0]
-            n_min = min(len(safe_idx), len(fall_idx))
-            if len(safe_idx) > n_min:
-                safe_idx = safe_idx[torch.tensor(rng.sample(range(len(safe_idx)), n_min))]
-            if len(fall_idx) > n_min:
-                fall_idx = fall_idx[torch.tensor(rng.sample(range(len(fall_idx)), n_min))]
-            keep = torch.cat([safe_idx, fall_idx])
-            perm = torch.randperm(len(keep))
-            self.observations = self.observations[keep][perm]
-            self.labels = self.labels[keep][perm]
-
-    def __len__(self) -> int:
-        return len(self.labels)
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.observations[idx], self.labels[idx]
-
-
-# ---------------------------------------------------------------------------
 # Iterable dataset for training on full sequences (GRU-compatible)
 # ---------------------------------------------------------------------------
 
@@ -270,6 +203,9 @@ def collate_sequences(
         T = obs.shape[0]
         obs_padded[i, :T] = obs
         labels_padded[i, :T] = labels
+        # Map ambiguous (-1) to cross_entropy's ignore_index so
+        # the loss function skips them natively.
+        labels_padded[i, :T][labels_padded[i, :T] == -1] = -100
         # Mask: include only non-ambiguous (label >= 0) timesteps.
         valid = labels >= 0
         mask[i, :T] = valid.float()

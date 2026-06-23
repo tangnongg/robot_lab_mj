@@ -47,11 +47,13 @@ import logging
 import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+import mujoco
+import mujoco.viewer
 import numpy as np
 import torch
 
@@ -63,10 +65,20 @@ if str(_src) not in sys.path:
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.entity import Entity
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
+from mjlab.envs.mdp.dr import actuator as dr_actuator
+from mjlab.envs.mdp.dr import body as dr_body
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlVecEnvWrapper, MjlabOnPolicyRunner
+from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
+from mjlab.terrains.heightfield_terrains import (
+    HfDiscreteObstaclesTerrainCfg,
+    HfRandomUniformTerrainCfg,
+    HfWaveTerrainCfg,
+)
 
 from robot_lab.tasks.safefall.fall_predictor.dataset import (
     TrajectoryWriter,
+    compute_labels,
     _T2_OFFSET_STEPS,
 )
 from robot_lab.tasks.safefall.fall_predictor.model import (
@@ -324,8 +336,6 @@ def _apply_batch_dr(
     pair and each distinct (dx, dy, dz) triplet triggers one batched
     DR call instead of per‑env tiny writes.
     """
-    from collections import defaultdict
-
     if env_ids is None:
         env_ids = torch.arange(len(states), device=device)
     eid_list = env_ids.cpu().tolist()
@@ -380,17 +390,11 @@ def collect_trajectories(
     env_cfg.scene.num_envs = num_envs
     N = num_envs
 
-    import mujoco
-    import mujoco.viewer
-
     rng = np.random.default_rng(seed)
     env = ManagerBasedRlEnv(env_cfg, device=device)
     asset: Entity = env.scene["robot"]
 
     # DR helpers.
-    from mjlab.envs.mdp.dr import actuator as dr_actuator
-    from mjlab.envs.mdp.dr import body as dr_body
-    from mjlab.managers.scene_entity_config import SceneEntityCfg
     _robot_cfg = SceneEntityCfg("robot", actuator_names=(".*",))
     _root_body_cfg = SceneEntityCfg("robot", body_names=("torso_link",))
 
@@ -548,7 +552,6 @@ def collect_trajectories(
                 stats.total_episodes += 1
 
                 if s.fell and traj_len >= _MIN_TRAJ_LEN:
-                    from robot_lab.tasks.safefall.fall_predictor.dataset import compute_labels
                     lbls = compute_labels(traj_len)
                     n_safe = int((lbls == 0).sum().item())
                     n_amb = int((lbls == -1).sum().item())
@@ -738,12 +741,6 @@ def _save_report(
 # ---------------------------------------------------------------------------
 
 def _build_foot_trip_terrain(base):
-    from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
-    from mjlab.terrains.heightfield_terrains import (
-        HfDiscreteObstaclesTerrainCfg,
-        HfRandomUniformTerrainCfg,
-        HfWaveTerrainCfg,
-    )
     _CELL, _HMAX = (8.0, 8.0), 0.15
     return TerrainEntityCfg(
         terrain_type="generator",
@@ -806,7 +803,6 @@ def main():
         use_terrain = False
 
     # Load nominal policy.
-    from dataclasses import asdict
     rl_cfg = load_rl_cfg(args.policy_task)
     runner_cls = load_runner_cls(args.policy_task) or MjlabOnPolicyRunner
 

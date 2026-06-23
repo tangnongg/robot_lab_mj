@@ -35,7 +35,6 @@ from .deploy import FallPredictorWrapper, load_predictor
 from .dataset import (
     TrajectoryWriter,
     compute_labels,
-    FallTrajectoryDataset,
     FallSequenceDataset,
     collate_sequences,
     masked_cross_entropy,

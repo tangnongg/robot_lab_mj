@@ -12,7 +12,7 @@ Paper deployment flow (Fig. 2d):
 Key paper metrics:
   - Inference time: < 0.5 ms (onboard CPU)
   - False alarm rate: < 0.1% (paper Table III)
-  - Lead time: 410 ms (paper Table III, t2 = T − 100 ms config)
+  - Lead time: 410 ms (paper Table III, t2 = T - 100 ms config)
 
 Usage::
 
@@ -82,6 +82,7 @@ class FallPredictorWrapper:
         self._consecutive_falling: int = 0
         self._is_falling: bool = False
         self._last_prob: float = 0.0
+        self._t_detect: int = 0
 
     def reset(self) -> None:
         """Reset hidden state and counters (call at episode start)."""
@@ -90,6 +91,7 @@ class FallPredictorWrapper:
         self._consecutive_falling = 0
         self._is_falling = False
         self._last_prob = 0.0
+        self._t_detect = 0
 
     def update(self, obs_dict: dict[str, torch.Tensor]) -> tuple[bool, float]:
         """Process one observation frame and return (is_falling, probability).
@@ -127,16 +129,19 @@ class FallPredictorWrapper:
         if self._step_count <= self.warmup_steps:
             return False, self._last_prob
 
-        # Leaky integrator / Leaky counter hysteresis:
-        # Increment if above threshold, decrement (leaks) if below.
-        # This acts as a low-pass filter to tolerate transient noise/drops.
+        # Strict consecutive‑frame hysteresis.
+        # A single frame below threshold resets the counter to zero.
         if self._last_prob > self.threshold:
             self._consecutive_falling += 1
         else:
-            self._consecutive_falling = max(0, self._consecutive_falling - 1)
+            self._consecutive_falling = 0
 
         if self._consecutive_falling >= self.confirmation_steps:
-            self._is_falling = True
+            if not self._is_falling:
+                # The alarm is raised NOW.  Record this moment so the
+                # caller can compute Lead Time = t_impact - _t_detect.
+                self._t_detect = self._step_count
+            self._is_falling = True  # latch — stays raised until reset()
 
         return self._is_falling, self._last_prob
 
@@ -152,11 +157,29 @@ class FallPredictorWrapper:
 
     @property
     def lead_time_steps(self) -> int:
-        """Approximate lead time in steps (since falling detected)."""
-        # TODO：实现和注释不符合，实现注释功能：论文中提到的 Lead Time（前置导引时间） 是指：从算法检测到摔倒（拉响警报），到机器人真正不可挽回地砸到地面（发生物理撞击）之间的时间差。 这个时间越长，留给防摔倒策略（SafeFall）做准备的时间就越充裕（论文中写道平均有 410 毫秒）。】
+        """Steps elapsed since the alarm was raised.
+
+        Lead Time (paper §III-C / Table III): the interval between
+        the fall predictor raising the alarm (``_is_falling`` first
+        becoming ``True``) and ground impact.  Read this property at
+        impact time to get the full lead time in steps (* 20 ms).
+
+        A longer lead time gives the SafeFall mitigation policy more
+        margin to execute protective maneuvers (paper reports 410 ms
+        average for the t₂ = T-100 ms config).
+        """
         if not self._is_falling:
             return 0
-        return self._consecutive_falling
+        return self._step_count - self._t_detect
+
+    @property
+    def detection_step(self) -> int:
+        """Global step at which the alarm was first raised (latch point).
+
+        Callers can compute: ``t_impact - detection_step`` to obtain
+        the paper's Lead Time metric.
+        """
+        return self._t_detect
 
 
 def load_predictor(

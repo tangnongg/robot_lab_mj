@@ -24,6 +24,7 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.envs.mdp.dr import actuator as dr_actuator
 from mjlab.envs.mdp.dr import body as dr_body
 from mjlab.envs.mdp.dr import geom as dr_geom
+from mjlab.envs.mdp.dr import joint as dr_joint
 from mjlab.envs.mdp.observations import (
     base_ang_vel,
     joint_pos_rel,
@@ -37,12 +38,14 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from robot_lab.asset_zoo.robots.unitree_g1.g1_constants import (
+    FULL_COLLISION,
     G1_ACTUATOR_4010,
     G1_ACTUATOR_5020,
     G1_ACTUATOR_7520_14,
@@ -140,6 +143,33 @@ _SAFEFALL_ARTICULATION = EntityArticulationInfoCfg(
 
 _JOINT_ASSET_CFG = SceneEntityCfg("robot", joint_names=(".*_joint",))
 
+
+# ---------------------------------------------------------------------------
+# Contact sensor — paper r_contact (Eq.3)
+# ---------------------------------------------------------------------------
+
+def _make_contact_sensor() -> ContactSensorCfg:
+    """Match all robot non-foot collision geoms against the terrain.
+
+    Uses ``reduce="none"`` so each geom's individual 3D contact force
+    is preserved in the output — needed for the component-heterogeneity
+    weights in Eq.3.
+    """
+    return ContactSensorCfg(
+        name="body_ground_contact",
+        primary=ContactMatch(
+            mode="geom",
+            pattern=r".*(?:hip|thigh|shin|knee|torso|head|shoulder|elbow|wrist|hand|pelvis|linkage_brace).*_collision\d*$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"),
+        reduce="none",
+        num_slots=1,
+        history_length=1,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Standing initial pose (matches IsaacLab SafeFall G1 init_state)
 # ---------------------------------------------------------------------------
@@ -183,9 +213,8 @@ def _build_actor_obs() -> dict[str, ObservationTermCfg]:
     """Deployable observation terms matching paper Section III-D.
 
     Paper: pelvis orientation (r,p), joint states (q, q̇), previous actions
-    a_{t-1}, angular velocity ω, projected gravity g_b.  Additionally includes
-    base_height as a pragmatic extra (useful for fall-mitigation), which is NOT
-    in the paper's deployable set but is commonly added in practice.
+    a_{t-1}, angular velocity ω, projected gravity g_b, stacked over 5
+    timesteps.
     """
     return {
         "pelvis_orientation": ObservationTermCfg(
@@ -220,10 +249,6 @@ def _build_actor_obs() -> dict[str, ObservationTermCfg]:
         "last_action": ObservationTermCfg(
             func=last_action,
             clip=(-50.0, 50.0),
-        ),
-        "base_height": ObservationTermCfg(
-            func=mdp.base_height,
-            clip=(-5.0, 5.0),
         ),
     }
 
@@ -286,28 +311,21 @@ def _privileged_root_com(
 
 def _build_rewards() -> dict[str, RewardTermCfg]:
     return {
-        # -- Paper r_impact (Eq.2): w_c·r_contact + w_j·r_joint + w_e·r_torque --
-        # r_contact (Eq.3) not implemented — needs per-link contact sensor.
-        "joint_reaction": RewardTermCfg(
-            func=mdp.reward_joint_reaction,  # r_joint proxy via qfrc_external
-            weight=-5.0e-7,
+        # -- r_impact (Eq.2): w_c·r_contact + w_j·r_joint + w_e·r_torque --
+        # r_contact (Eq.3): ContactSensor not providing force data yet.
+        "r_contact": RewardTermCfg(
+            func=mdp.reward_contact_force,
+            weight=-1.0,  # w_c — placeholder; sensor forces unavailable
         ),
-        "torque_penalty": RewardTermCfg(
-            func=mdp.reward_joint_torques,  # r_torque Eq.5: normalized τ/τ̄ ratio
-            weight=-2.5e-6,
+        # r_joint (Eq.4): qfrc_external proxy
+        "r_joint": RewardTermCfg(
+            func=mdp.reward_joint_reaction,
+            weight=-5.0e-7,  # w_j — qfrc_external can reach hundreds of N·m
         ),
-        # -- Proxy protective rewards (compensate for absent r_contact) --
-        "protect_head": RewardTermCfg(
-            func=mdp.reward_protect_head,
-            weight=5.0,
-        ),
-        "body_orientation": RewardTermCfg(
-            func=mdp.reward_body_orientation,
-            weight=3.0,
-        ),
-        "energy_absorption": RewardTermCfg(
-            func=mdp.reward_energy_absorption,
-            weight=2.0,
+        # r_torque (Eq.5): normalized torque ratio
+        "r_torque": RewardTermCfg(
+            func=mdp.reward_joint_torques,
+            weight=-2.5e-6,  # w_e — per‑joint ratio already in [0, 1] range
         ),
         # -- r_regulation --
         "action_rate": RewardTermCfg(
@@ -325,10 +343,6 @@ def _build_rewards() -> dict[str, RewardTermCfg]:
         "joint_pos_limits": RewardTermCfg(
             func=mdp.reward_joint_pos_limits,
             weight=-10.0,
-        ),
-        "base_lin_vel": RewardTermCfg(
-            func=mdp.reward_base_lin_vel,
-            weight=-0.01,
         ),
     }
 
@@ -353,25 +367,41 @@ def _build_terminations() -> dict[str, TerminationTermCfg]:
 
 
 # ---------------------------------------------------------------------------
-# Events — Stage I reset + domain randomization (paper Table II)
+# Events — Stage I/II reset + domain randomization (paper Table II)
 # ---------------------------------------------------------------------------
 
 
-def _build_events() -> dict[str, EventTermCfg]:
-    return {
-        # -- Reset: random falling configurations (Stage I curriculum) --
-        "reset_falling": EventTermCfg(
-            func=mdp.reset_falling_state,
+def _build_reset_event(stage2: bool = False) -> EventTermCfg:
+    """Return the appropriate reset event for the given curriculum stage."""
+    if stage2:
+        return EventTermCfg(
+            func=mdp.reset_falling_from_bank,
             mode="reset",
             params={
-                "height_range": (0.4, 0.9),
-                "vel_range": (0.0, 2.0),
-                "ang_vel_range": (-1.0, 1.0),
+                "bank_path": "models/stage2_state_bank.pt",
+                "pos_noise": 0.05,
+                "vel_noise": 0.1,
             },
-        ),
-        # -- Startup domain randomization (paper Table II) --
-        # Friction: U(0.3, 1.0) — tangential friction on all robot geoms
-        "dr_friction": EventTermCfg(
+        )
+    return EventTermCfg(
+        func=mdp.reset_falling_state,
+        mode="reset",
+        params={
+            "height_range": (0.4, 0.9),
+            "vel_range": (0.0, 2.0),
+            "ang_vel_range": (-1.0, 1.0),
+        },
+    )
+
+
+def _build_events(stage2: bool = False) -> dict[str, EventTermCfg]:
+    reset_term = _build_reset_event(stage2)
+    return {
+        # 0 — Reset: falling configurations (Stage I random / Stage II bank)
+        "reset_falling": reset_term,
+        # ── Startup domain randomization (paper Table II) ──
+        # 1 — Friction  U(0.3, 1.0)
+        "dr_01_friction": EventTermCfg(
             func=dr_geom.geom_friction,
             mode="startup",
             params={
@@ -379,8 +409,19 @@ def _build_events() -> dict[str, EventTermCfg]:
                 "ranges": (0.3, 1.0),
             },
         ),
-        # Base mass + inertia randomization (logU scaling).
-        "dr_mass_inertia": EventTermCfg(
+        # 2 — Restitution  U(0.0, 0.5)  — TODO
+        #     MuJoCo stores restitution in geom‑pair solref/solimp, not on
+        #     individual geoms.  mjlab's DR module has pair_friction but no
+        #     pair_solref / pair_solimp randomizer.  Needs a custom DR
+        #     function that iterates mjModel.pair_solref and applies
+        #     U(0.0, 0.5) to the first component.
+        # "dr_02_restitution": EventTermCfg(
+        #     func=...,
+        #     mode="startup",
+        #     params={...},
+        # ),
+        # 3 — Base mass offset  U(−1.0, 3.0) kg (log‑uniform approximation)
+        "dr_03_mass": EventTermCfg(
             func=dr_body.pseudo_inertia,
             mode="startup",
             params={
@@ -388,8 +429,20 @@ def _build_events() -> dict[str, EventTermCfg]:
                 "alpha_range": (-0.1, 0.1),  # mass scale ~ exp(2α)
             },
         ),
-        # Joint PD gain randomization: stiffness logU(0.7, 1.5), damping logU(0.5, 3.0)
-        "dr_pd_gains": EventTermCfg(
+        # 4 — Base CoM offset  x,y~U(−0.05,0.05), z~U(−0.01,0.01)
+        "dr_04_com_offset": EventTermCfg(
+            func=dr_body.body_com_offset,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+                "ranges": {0: (-0.05, 0.05), 1: (-0.05, 0.05), 2: (-0.01, 0.01)},
+                "distribution": "uniform",
+                "operation": "add",
+            },
+        ),
+        # 5 — Joint stiffness scale  logU(0.7, 1.5)
+        # 6 — Joint damping scale    logU(0.5, 3.0)
+        "dr_05_06_pd_gains": EventTermCfg(
             func=dr_actuator.pd_gains,
             mode="startup",
             params={
@@ -398,6 +451,17 @@ def _build_events() -> dict[str, EventTermCfg]:
                 "kd_range": (0.5, 3.0),
                 "distribution": "log_uniform",
                 "operation": "scale",
+            },
+        ),
+        # 7 — Joint position limits  N(0, 0.02)
+        "dr_07_joint_limits": EventTermCfg(
+            func=dr_joint.joint_limits,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
+                "ranges": (-0.02, 0.02),
+                "distribution": "gaussian",
+                "operation": "add",
             },
         ),
     }
@@ -410,6 +474,7 @@ def _build_events() -> dict[str, EventTermCfg]:
 
 def unitree_g1_safefall_env_cfg(
     play: bool = False,
+    stage2: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     """Build a SafeFall environment config for the Unitree G1.
 
@@ -420,14 +485,19 @@ def unitree_g1_safefall_env_cfg(
     - Asymmetric actor-critic with 5-frame observation history
 
     Args:
-        play: If True, produce a play-mode config (fewer envs, no noise).
+        play: If True, use a play-mode config (fewer envs, no noise).
+        stage2: If True, sample initial states from the Stage II bank
+            (predictor-flagged falling states) instead of random configs.
     """
     base_robot_cfg = get_g1_robot_cfg()
+    # Both stages use full collision geometry so the ContactSensor
+    # for r_contact (Eq.3) always works.
+    collisions = (FULL_COLLISION,)
     robot_cfg = EntityCfg(
         init_state=_SAFEFALL_STANDING_INIT,
         spec_fn=base_robot_cfg.spec_fn,
         articulation=_SAFEFALL_ARTICULATION,
-        collisions=base_robot_cfg.collisions,
+        collisions=collisions,
         sort_actuators=base_robot_cfg.sort_actuators,
     )
 
@@ -449,6 +519,7 @@ def unitree_g1_safefall_env_cfg(
         scene=SceneCfg(
             terrain=TerrainEntityCfg(terrain_type="plane"),
             entities={"robot": robot_cfg},
+            sensors=(_make_contact_sensor(),),
             num_envs=4096,
             extent=2.5,
         ),
@@ -478,7 +549,7 @@ def unitree_g1_safefall_env_cfg(
             )
         },
         commands={},
-        events=_build_events(),
+        events=_build_events(stage2=stage2),
         rewards=_build_rewards(),
         terminations=_build_terminations(),
         viewer=ViewerConfig(

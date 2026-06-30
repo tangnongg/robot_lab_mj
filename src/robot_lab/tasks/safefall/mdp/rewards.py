@@ -57,6 +57,110 @@ _MAX_TORQUE = torch.tensor(
 )
 
 # ---------------------------------------------------------------------------
+# Component heterogeneity weights (paper §III-D, Eq.3)
+# geom name → vulnerability weight w_s ∈ {1000, 1, 0.5}
+# ---------------------------------------------------------------------------
+# High:   head, hands                                 → w_s = 1000
+# Medium: shanks, shoulders, feet                      → w_s = 1
+# Low:    torso, thighs, elbows, pelvis, hips, etc.   → w_s = 0.5
+# ---------------------------------------------------------------------------
+_VULNERABILITY_HIGH = 1000.0
+_VULNERABILITY_MED = 1.0
+_VULNERABILITY_LOW = 0.5
+
+_GEOM_VULNERABILITY: dict[str, float] = {
+    "head_collision": _VULNERABILITY_HIGH,
+    "left_hand_collision": _VULNERABILITY_HIGH,
+    "right_hand_collision": _VULNERABILITY_HIGH,
+    # medium
+    "left_shin_collision": _VULNERABILITY_MED,
+    "right_shin_collision": _VULNERABILITY_MED,
+    "left_shoulder_yaw_collision": _VULNERABILITY_MED,
+    "right_shoulder_yaw_collision": _VULNERABILITY_MED,
+    # low
+    "torso_collision": _VULNERABILITY_LOW,
+    "pelvis_collision": _VULNERABILITY_LOW,
+    "left_thigh_collision": _VULNERABILITY_LOW,
+    "right_thigh_collision": _VULNERABILITY_LOW,
+    "left_hip_collision": _VULNERABILITY_LOW,
+    "right_hip_collision": _VULNERABILITY_LOW,
+    "left_elbow_yaw_collision": _VULNERABILITY_LOW,
+    "right_elbow_yaw_collision": _VULNERABILITY_LOW,
+    "left_wrist_collision": _VULNERABILITY_LOW,
+    "right_wrist_collision": _VULNERABILITY_LOW,
+    "left_linkage_brace_collision": _VULNERABILITY_LOW,
+    "right_linkage_brace_collision": _VULNERABILITY_LOW,
+}
+
+# ---------------------------------------------------------------------------
+# Paper r_contact (Eq. 3): component‑heterogeneity contact force penalty
+#   r_contact = (1/N) Σ I{c_i}·w_{s,i}·[f_{contact,i} − m_i·g]_+²
+#             + α · max_i { I{c_i}·w_{s,i}·[f_{contact,i} − m_i·g]_+² }
+# where N = Σ I{c_i} (active contacts) and α = 0.3
+# ---------------------------------------------------------------------------
+
+
+def reward_contact_force(
+    env: ManagerBasedRlEnv,
+    alpha: float = 0.3,
+    sensor_name: str = "body_ground_contact",
+) -> torch.Tensor:
+    """Per‑link contact force penalty with component heterogeneity weights.
+
+    Reads per‑geom contact forces from a ContactSensor and applies
+    vulnerability weights w_s ∈ {1000, 1, 0.5} per the paper (head/hands
+    → 1000, shanks/shoulders → 1, torso/thighs/elbows → 0.5).
+
+    Adjacent‑link collisions are excluded by the sensor pattern (only
+    links versus terrain, not link‑versus‑link).
+    """
+    from mjlab.sensor import ContactSensor
+
+    sensor: ContactSensor = env.scene[sensor_name]
+    if sensor.data.force is None or sensor.data.found is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    # ContactData tensors: [B, P], [B, P, 3] (no history/slots when
+    # history_length=1, num_slots=1, reduce="none").
+    force = sensor.data.force  # [B, P, 3]
+    found = sensor.data.found  # [B, P]
+    contact_mask = (found > 0.0).float()  # [B, P]
+
+    # Build per‑geom vulnerability weight tensor.
+    w_s = torch.tensor(
+        [_GEOM_VULNERABILITY.get(n, _VULNERABILITY_LOW)
+         for n in sensor.primary_names],
+        device=env.device,
+    )  # (N_geoms,)
+
+    # Body mass vector (kg) — indexed via geom→body lookup on CPU.
+    asset: Entity = env.scene["robot"]
+    mjm = env.sim.mj_model
+    g_val = mjm.opt.gravity[2]  # −9.81, take abs for loading
+    body_mass = torch.tensor(
+        [mjm.body_mass[mjm.geom_bodyid[g]]
+         for g, _ in enumerate(sensor.primary_names)],
+        device=env.device,
+    )  # (N_geoms,)
+
+    # Contact force magnitude.
+    f_contact = torch.norm(force, dim=-1)  # (B, N_geoms)
+    m_g = body_mass * abs(g_val)  # (N_geoms,) gravitational loading
+
+    # Clip to penalty: only force excess over gravitational loading.
+    excess = torch.clamp(f_contact - m_g.unsqueeze(0), min=0.0)  # (B, N_geoms)
+
+    weighted = contact_mask * w_s.unsqueeze(0) * excess ** 2  # (B, N_geoms)
+
+    N_active = contact_mask.sum(dim=-1).clamp(min=1)  # (B,)
+
+    r_avg = weighted.sum(dim=-1) / N_active  # Eq.3 first term
+    r_peak = weighted.max(dim=-1)[0]  # Eq.3 second term (max over i)
+
+    return -(r_avg + alpha * r_peak)
+
+
+# ---------------------------------------------------------------------------
 # Paper r_torque (Eq. 5):  r_torque = Σ_j [|τ_j| / τ̄_j − 1]_+²
 # ---------------------------------------------------------------------------
 
@@ -80,10 +184,22 @@ def reward_joint_torques(
 
 # ---------------------------------------------------------------------------
 # Paper r_joint (Eq. 4):  r_joint = Σ_j ‖f_{joint,j} − f_thresh,j‖²
-# Approximated via qfrc_external (body wrench in joint space).
-# f_thresh is set to 0.5 * τ̄ (mechanical load capacity).
+#
+# f_{joint,j} is the joint-reaction force that maintains kinematic
+# constraints between adjacent links during impact propagation.
+# MuJoCo stores this in efc_force, but the Warp backend does not
+# expose efc_force to Python (shape is always (0,)).  We use
+# qfrc_external (J^T × body wrench in joint space) as a proxy —
+# it captures the joint-space contribution of external body-level
+# wrenches (xfrc_applied), which are the dominant loading component
+# during falls.
+#
+# f_thresh,j is set to 0.5 × τ̄_j, where τ̄_j is the actuator's
+# maximum rated torque (effort_limit).  This approximates the
+# joint's mechanical load capacity: for typical robot actuators,
+# the sustainable static structural load is ~50% of the peak
+# electromagnetic torque before bearing / gear degradation.
 # ---------------------------------------------------------------------------
-
 
 def reward_joint_reaction(
     env: ManagerBasedRlEnv,
@@ -92,9 +208,9 @@ def reward_joint_reaction(
 ) -> torch.Tensor:
     """Joint reaction force penalty — proxy for paper Eq.4.
 
-    Uses qfrc_external (J^T × xfrc_applied contribution to joint space)
-    as a proxy for joint reaction forces. Penalizes when external wrench
-    contributions exceed a fraction of the joint's mechanical load capacity.
+    Proxy: replaces f_{joint} with qfrc_external (body wrench in
+    joint space).  Penalises when this exceeds half the actuator's
+    maximum rated torque (mechanical load capacity estimate).
     """
     asset: Entity = env.scene[asset_cfg.name]
     f_ext = torch.abs(asset.data.qfrc_external)  # (N, 29)
@@ -150,59 +266,3 @@ def reward_joint_pos_limits(
     return torch.sum(below + above, dim=-1)
 
 
-# ---------------------------------------------------------------------------
-# Proxy rewards (compensate for missing r_contact)
-# ---------------------------------------------------------------------------
-
-
-def reward_protect_head(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward keeping base height away from ground impact.
-
-    Core SafeFall objective: protect vulnerable components by keeping
-    the base (pelvis) elevated relative to the ground during fall.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    base_height = asset.data.root_link_pos_w[:, 2]
-    return torch.clamp(base_height, min=0.0, max=0.8)
-
-
-def reward_body_orientation(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward the robot for orienting to land on robust body parts.
-
-    The paper shows the robot learns to rotate to land on torso/back
-    rather than head/hands. Penalizes head-down orientation.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    gravity_proj = asset.data.projected_gravity_b
-    head_down_penalty = torch.clamp(gravity_proj[:, 2], min=0.0)
-    return -head_down_penalty
-
-
-def reward_energy_absorption(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward controlled deceleration (energy absorption through joints).
-
-    The paper emphasizes distributing impact over time. We reward
-    negative work done by joints (energy absorption).
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    power = asset.data.qfrc_actuator * asset.data.joint_vel
-    absorption = torch.clamp(-power, min=0.0)
-    return torch.sum(absorption, dim=-1) * 0.001
-
-
-def reward_base_lin_vel(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Penalize high base linear velocity at impact (reduce impact force)."""
-    asset: Entity = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.root_link_lin_vel_w), dim=-1)

@@ -14,3 +14,12 @@ register_mjlab_task(
     play_env_cfg=unitree_g1_safefall_env_cfg(play=True),
     rl_cfg=unitree_g1_safefall_ppo_runner_cfg(),
 )
+
+# Stage II curriculum: sample initial states from the predictor-flagged
+# bank (requires running prepare_stage2_states.py first).
+register_mjlab_task(
+    task_id="Mjlab-SafeFall-StageII-G1",
+    env_cfg=unitree_g1_safefall_env_cfg(stage2=True),
+    play_env_cfg=unitree_g1_safefall_env_cfg(play=True, stage2=True),
+    rl_cfg=unitree_g1_safefall_ppo_runner_cfg(),
+)

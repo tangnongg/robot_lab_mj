@@ -63,14 +63,13 @@ def reward_orientation(
     orientation_threshold: float = 0.99,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward upright orientation when base height is above *phase1_height*."""
+    """Densely reward upright orientation throughout the stand-up motion."""
     asset: Entity = env.scene[asset_cfg.name]
     gravity_proj = asset.data.projected_gravity_b
-    base_height = asset.data.root_link_pos_w[:, 2]
     reward = _tolerance(
         -gravity_proj[:, 2], (orientation_threshold, np.inf), 1.0, 0.05
     )
-    return reward * (base_height > phase1_height).float()
+    return reward
 
 
 def reward_head_height(
@@ -81,7 +80,7 @@ def reward_head_height(
     foot_body_names: list[str] | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward head height above feet."""
+    """Reward torso/head height in the world frame, as defined in HoST."""
     asset: Entity = env.scene[asset_cfg.name]
     body_names = list(asset.body_names)
 
@@ -91,13 +90,8 @@ def reward_head_height(
     if foot_body_names is None:
         foot_body_names = ["left_ankle_roll_link", "right_ankle_roll_link"]
     foot_indices = [body_names.index(n) for n in foot_body_names]
-    feet_height = asset.data.body_link_pos_w[:, foot_indices, 2].mean(
-        dim=-1, keepdim=True
-    )
-
-    relative_height = head_height - feet_height
     reward = _tolerance(
-        relative_height, (target_head_height, np.inf), target_head_margin, 0.1
+        head_height, (target_head_height, np.inf), target_head_margin, 0.1
     )
     return reward.squeeze(-1)
 
@@ -169,8 +163,10 @@ def reward_joint_tracking_error(
 ) -> torch.Tensor:
     """Penalize deviation from joint position targets."""
     asset: Entity = env.scene[asset_cfg.name]
-    target = env.action_manager.action + asset.data.default_joint_pos
-    return torch.sum(torch.square(target - asset.data.joint_pos), dim=-1)
+    action_term = env.action_manager.get_term("joint_pos")
+    target = action_term.target_joint_pos
+    current = asset.data.joint_pos[:, action_term.target_ids]
+    return torch.sum(torch.square(target - current), dim=-1)
 
 
 def reward_dof_pos_limits(
@@ -541,4 +537,4 @@ def reward_target_base_height(
     asset: Entity = env.scene[asset_cfg.name]
     base_height = asset.data.root_link_pos_w[:, 2]
     standup = (base_height > phase3_height).float()
-    return torch.exp(torch.abs(base_height - target_height) * -20) * standup
+    return torch.exp(torch.square(base_height - target_height) * -20) * standup

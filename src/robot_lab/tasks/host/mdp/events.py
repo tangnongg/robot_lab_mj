@@ -6,10 +6,45 @@ from typing import TYPE_CHECKING
 
 import torch
 from mjlab.entity import Entity
+from mjlab.envs.mdp.events import resolve_env_ids
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
+
+
+def reset_joints_scaled(
+    env: "ManagerBasedRlEnv",
+    env_ids: torch.Tensor | None,
+    scale_range: tuple[float, float] = (0.9, 1.1),
+    offset_range: tuple[float, float] = (-0.05, 0.05),
+    velocity_range: tuple[float, float] = (0.0, 0.0),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=(".*_joint",)),
+) -> None:
+    """Reset around the configured pose using multiplicative and additive noise."""
+    reset_ids = resolve_env_ids(env, env_ids)
+    asset: Entity = env.scene[asset_cfg.name]
+    joint_ids = asset_cfg.joint_ids
+    if isinstance(joint_ids, list):
+        joint_ids_tensor = torch.tensor(joint_ids, device=env.device)
+    else:
+        joint_ids_tensor = joint_ids
+
+    default_pos = asset.data.default_joint_pos[reset_ids][:, joint_ids].clone()
+    scale = torch.empty_like(default_pos).uniform_(*scale_range)
+    offset = torch.empty_like(default_pos).uniform_(*offset_range)
+    joint_pos = default_pos * scale + offset
+    limits = asset.data.soft_joint_pos_limits[reset_ids][:, joint_ids]
+    joint_pos.clamp_(limits[..., 0], limits[..., 1])
+
+    default_vel = asset.data.default_joint_vel[reset_ids][:, joint_ids].clone()
+    joint_vel = default_vel + torch.empty_like(default_vel).uniform_(*velocity_range)
+    asset.write_joint_state_to_sim(
+        joint_pos,
+        joint_vel,
+        env_ids=reset_ids,
+        joint_ids=joint_ids_tensor,
+    )
 
 
 def apply_traction_force(
@@ -66,11 +101,14 @@ def apply_traction_force(
 def reset_action_rescale(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor,
+    initial_rescale: float = 1.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> None:
     """Initialize action rescale buffer on reset if not already done."""
     if not hasattr(env, "host_action_rescale"):
-        env.host_action_rescale = torch.ones(env.num_envs, device=env.device)
+        env.host_action_rescale = torch.full(
+            (env.num_envs,), initial_rescale, device=env.device
+        )
 
 
 def update_last_last_action(
@@ -99,3 +137,35 @@ def reset_last_last_action(
             env.num_envs, num_actions, device=env.device
         )
     env.host_last_last_action[env_ids] = 0.0
+
+
+def reset_standup_success(
+    env: "ManagerBasedRlEnv",
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Reset the per-episode stand-up success latch."""
+    if not hasattr(env, "host_standup_success"):
+        env.host_standup_success = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    env.host_standup_success[env_ids] = False
+
+
+def update_standup_success(
+    env: "ManagerBasedRlEnv",
+    env_ids: torch.Tensor,
+    threshold_height: float = 0.65,
+    upright_gravity_z: float = -0.8,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> None:
+    """Latch whether each environment has reached the standing stage."""
+    if not hasattr(env, "host_standup_success"):
+        env.host_standup_success = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    asset: Entity = env.scene[asset_cfg.name]
+    standing = (
+        asset.data.root_link_pos_w[env_ids, 2] > threshold_height
+    ) & (asset.data.projected_gravity_b[env_ids, 2] < upright_gravity_z)
+    env.host_standup_success[env_ids] |= standing

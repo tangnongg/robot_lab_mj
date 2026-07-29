@@ -119,11 +119,14 @@ def last_action(
 
 def action_rescale_obs(
     env: "ManagerBasedRlEnv",
+    initial_rescale: float = 1.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Current action rescale factor with noise ±0.025, zeroed during unactuated."""
     if not hasattr(env, "host_action_rescale"):
-        env.host_action_rescale = torch.ones(env.num_envs, device=env.device)
+        env.host_action_rescale = torch.full(
+            (env.num_envs,), initial_rescale, device=env.device
+        )
     noise = (torch.rand(env.num_envs, 1, device=env.device) - 0.5) * 0.05
     result = env.host_action_rescale.unsqueeze(1) + noise
     return _zero_during_unactuated(env, result)

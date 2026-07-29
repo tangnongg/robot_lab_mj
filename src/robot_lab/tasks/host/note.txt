@@ -1,0 +1,232 @@
+ beta参数是做什么的？截图你是怎么获得的？独立评估是哪段代码，做了什么？
+
+
+• 我会直接对照当前实现说明这三部分，并标出具体代码位置，尤其区分训练课程中的 β 和评估时强制指定的 β。
+
+• Explored
+  └ Read env_cfgs.py, actions.py, curriculums.py, evaluate.py
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• β 参数
+
+  β 是策略动作到关节位置目标之间的缩放系数。实际控制公式是：
+
+  target_joint_pos = current_joint_pos + clamp(action, -1, 1) * beta
+
+  实现在 src/robot_lab/tasks/host/mdp/actions.py:49。
+
+  例如某个关节策略输出 action=0.8：
+
+  - β=1.0：本周期目标位置相对当前关节增加 0.8 rad
+  - β=0.25：只增加 0.2 rad
+
+  因此 β 越小，单个控制周期允许的关节目标变化越小，动作更细、更平滑，也更难完成爆发式起身。训练时采用课程学习：
+
+  - 初始 β=1.0
+  - 每次成功后减少 0.02
+  - 最低降到 0.25
+
+  对应代码在 src/robot_lab/tasks/host/mdp/curriculums.py:73 和 src/robot_lab/tasks/host/env_cfgs.py:583。
+
+  截图的获取方式
+
+  截图通过新增的 src/robot_lab/tasks/host/evaluate.py:114 获取：
+
+  1. 创建 render_mode="rgb_array" 的无头 MJLab 环境。
+  2. 加载训练后的 actor。
+  3. 策略运行到指定 step。
+  4. 调用 base_env.render() 得到 RGB 数组。
+  5. 使用 PIL 保存成 PNG。
+
+  例如稳定站立截图使用的是最终 model_799.pt，在第 250 个控制周期保存：
+
+  python -m robot_lab.tasks.host.evaluate \
+    --checkpoint logs/rsl_rl/g1_host_ground/2026-07-28_22-54-13_supine_v3_latched/model_799.pt \
+    --num-envs 1 \
+    --episodes 1 \
+    --force 0 \
+    --action-rescale 0.25 \
+    --snapshot artifacts/host_supine_stable_stand.png \
+    --snapshot-step 250 \
+    --snapshot-only
+
+  控制周期为 0.02 s，所以 step 250 大约是第 5 秒。
+
+  - artifacts/host_supine_start.png
+  - artifacts/host_supine_stable_stand.png
+
+  这些截图来自强制 0 N、β=0.25 的独立评估，不是后来发现 β 初始化有问题的标准 play 录像。
+
+  独立评估做了什么
+
+  独立评估就是 src/robot_lab/tasks/host/evaluate.py:36。它不训练、不更新网络，只加载 checkpoint 的 actor 做推理：
+
+  - 默认并行运行 256 个环境。
+  - 总计收集 1024 个完整回合。
+  - 每回合 10 秒。
+  - 强制关闭牵引力：force=0 N。
+  - 强制使用最终动作尺度：β=0.25。
+  - 使用环境原有的随机关节初始扰动。
+  - 每一步记录骨盆高度、身体方向和连续直立时间。
+
+  直立条件在 src/robot_lab/tasks/host/evaluate.py:100：
+
+  base_height > 0.65 and projected_gravity_z < -0.9
+
+  连续满足至少 0.5 s 才计为一次成功。除此之外还统计：
+
+  - 回合最大骨盆高度
+  - 最大相对躯干高度
+  - 最长连续直立时间
+
+  最终 model_799.pt 的 1024 回合结果是：
+
+  success_rate=1.0000
+  mean_max_base_height=0.7565
+  mean_max_head_height=0.7600
+  mean_best_upright_time=8.3928
+
+  也就是 1024 回合全部完成起身，平均能在 10 秒回合中连续直立约 8.39 秒。
+
+
+  =============================================================================================
+
+  1. L2C2 是什么
+
+  L2C2 全称是 Locally Lipschitz Continuous Constraint，即“局部 Lipschitz 连续性约束”。它不是普通的 L2 权重衰减。
+
+  HoST 在相邻状态之间采样一个插值状态：
+
+  s_bar = s_t + u * (s_{t+1} - s_t),  u ~ U(0, 1)
+
+  然后约束网络在相近状态下不要产生突变：
+
+  L_L2C2 =
+      lambda_policy * D(policy(s_t), policy(s_bar))
+    + lambda_value  * sum_i D(V_i(s_t), V_i(s_bar))
+
+  论文中：
+
+  lambda_policy = 1
+  lambda_value = 0.1
+
+  它解决的是：
+
+  - IMU 或关节观测发生很小变化时，动作不能突然跳变；
+  - critic 对相近状态的价值估计不能剧烈变化；
+  - 减少动作振荡，提高 sim-to-real 稳定性。
+
+  当前实现中的 reward_action_rate 和 reward_smoothness 不等于 L2C2。它们惩罚已经执行出来的连续动作差异：
+
+  ||a_t - a_{t-1}||²
+  ||a_t - 2a_{t-1} + a_{t-2}||²
+
+  而 L2C2 是直接在 PPO 优化过程中，对 actor 和 critic 额外做两次前向计算并增加网络连续性 loss。当前 PPO 中没有这项 loss，因此当前实现确实没有 L2C2。
+
+  2. 为什么说当前是单 critic
+
+  当前配置只定义了一个 critic：
+
+  src/robot_lab/tasks/host/rl_cfg.py:32
+
+  critic=RslRlModelCfg(
+      hidden_dims=(512, 256),
+  )
+
+  运行时这个 critic 最终只输出一个标量价值：
+
+  Linear(in_features=256, out_features=1)
+
+  RSL-RL PPO 内部也是单个 self.critic：
+
+  /data1/tanglong/miniconda3/envs/env_mjlab_e/lib/python3.10/site-packages/rsl_rl/algorithms/ppo.py:83
+
+  同时，MJLab 的 RewardManager 会先把全部 reward term 加成一个标量：
+
+  /data1/tanglong/mjlab/src/mjlab/managers/reward_manager.py:116
+
+  self._reward_buf += value
+
+  所以当前数据流是：
+
+  task + style + regularization + post-task
+                      ↓
+               一个标量 reward
+                      ↓
+                一个 critic V(s)
+
+  论文则为四组 reward 分别建立 critic：
+
+  task reward           -> V_task
+  style reward          -> V_style
+  regularization reward -> V_regu
+  post-task reward      -> V_post
+
+  每组独立计算 GAE、独立标准化 advantage，最后加权合成 actor advantage。要完整实现它，需要修改环境 reward 输出、rollout storage、GAE 和 PPO loss，不是把 critic 输出维度改成 4 就够了。
+
+  当前单 critic 能成功，主要因为这里只训练 Ground，并重新平衡了 reward、增加了稠密奖励和课程机制。这不能证明多 critic 对论文的完整多姿态任务不重要。
+
+  3. 当前 ankle parallel 是否生效
+
+  函数在 src/robot_lab/tasks/host/mdp/rewards.py:376，但它现在每只脚只取一个 body：
+
+  left_ankle_body_names = ["left_ankle_roll_link"]
+  right_ankle_body_names = ["right_ankle_roll_link"]
+
+  单点无法计算平面方向。因此代码在只有一个点时直接设置：
+
+  left_var = 0
+  right_var = 0
+
+  结果永远是：
+
+  reward = (0 < 0.05) = 1
+
+  这不是有效的 ankle parallel reward，而是恒定奖励。
+
+  目前配置权重为 0.0：
+
+  src/robot_lab/tasks/host/env_cfgs.py:331
+
+  并且 RewardManager 遇到零权重会直接跳过函数调用：
+
+  if term_cfg.weight == 0.0:
+      continue
+
+  所以准确结论是：
+
+  - 函数被注册在配置中；
+  - 日志中可能显示该 term；
+  - 运行时不计算；
+  - 对总 reward 和策略梯度没有贡献。
+
+  另外，当前 MJCF 并非完全没有 foot site，而是每只脚只有一个中心 site：left_foot 和 right_foot，见 src/robot_lab/asset_zoo/robots/unitree_g1/xmls/g1.xml:100。一个 site 仍不足以计算平面。
+
+  4. 如何正确定义 keypoint
+
+  建议在每个 ankle_roll_link 下添加四个不参与碰撞的 site，放在脚底四角：
+
+  <site name="left_foot_front_left"  pos="0.11  0.025 -0.025"/>
+  <site name="left_foot_front_right" pos="0.11 -0.025 -0.025"/>
+  <site name="left_foot_rear_left"   pos="-0.04  0.018 -0.025"/>
+  <site name="left_foot_rear_right"  pos="-0.04 -0.018 -0.025"/>
+
+  右脚同样定义四个。具体坐标应根据 foot collision geom 或网格边界校准。
+
+  然后使用世界坐标中的 site 高度：
+
+  left_z = asset.data.site_pos_w[:, left_site_ids, 2]
+  right_z = asset.data.site_pos_w[:, right_site_ids, 2]
+
+  variance = 0.5 * (
+      left_z.var(dim=1, correction=0)
+      + right_z.var(dim=1, correction=0)
+  )
+  reward = (variance < threshold).float()
+
+  MJLab 已提供 site_pos_w 接口：/data1/tanglong/mjlab/src/mjlab/entity/data.py:561。
+
+  四个脚底点处于同一刚体平面。当脚掌平行地面时，它们的世界坐标 z 接近一致；发生 pitch 或 roll 时，前后或左右点产生高度差，方差随之增大。
+
+  实现后还需要重新标定 0.05 阈值及是否保留当前的 z * 10 缩放，不能直接假设 Isaac Gym 和 MJLab 的 keypoint 单位及实现完全相同。

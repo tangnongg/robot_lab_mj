@@ -48,11 +48,18 @@ class RelativeJointPositionAction(JointPositionAction):
 
     def process_actions(self, actions: torch.Tensor) -> None:
         """Apply relative offset and unactuated gating before scale/offset."""
+        if not hasattr(self._env, "host_action_rescale"):
+            self._env.host_action_rescale = torch.full(
+                (self._env.num_envs,), self.cfg.initial_rescale,
+                device=self._env.device,
+            )
+
         # Gate: zero actions during unactuated period
         active = (
             self._env.episode_length_buf > self._unactuated_steps
         ).float().unsqueeze(-1)
-        actions = actions * active
+        actions = actions.clamp(-1.0, 1.0)
+        actions = actions * active * self._env.host_action_rescale.unsqueeze(-1)
 
         # Relative control: offset = current joint position
         self._current_offset[:] = self._entity.data.joint_pos[
@@ -61,6 +68,11 @@ class RelativeJointPositionAction(JointPositionAction):
         self._offset = self._current_offset
 
         super().process_actions(actions)
+
+    @property
+    def target_joint_pos(self) -> torch.Tensor:
+        """Absolute PD target produced for the current policy step."""
+        return self._processed_actions
 
 
 @dataclass(kw_only=True)
@@ -73,6 +85,7 @@ class RelativeJointPositionActionCfg(JointPositionActionCfg):
     """
 
     unactuated_steps: int = 30
+    initial_rescale: float = 1.0
 
     def __post_init__(self):
         # Must be joint-level control

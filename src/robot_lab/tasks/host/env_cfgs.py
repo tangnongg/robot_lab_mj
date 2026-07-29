@@ -144,7 +144,16 @@ _G1_ARTICULATION_OFFICIAL = EntityArticulationInfoCfg(
     soft_joint_pos_limit_factor=0.9,
 )
 
-_JOINT_ASSET_CFG = SceneEntityCfg("robot", joint_names=(".*_joint",))
+_POLICY_JOINT_NAMES = (
+    ".*_hip_.*_joint",
+    ".*_knee_joint",
+    ".*_ankle_.*_joint",
+    "waist_yaw_joint",
+    ".*_shoulder_.*_joint",
+    ".*_elbow_joint",
+    ".*_wrist_roll_joint",
+)
+_JOINT_ASSET_CFG = SceneEntityCfg("robot", joint_names=_POLICY_JOINT_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +199,9 @@ def _make_nonfeet_contact_sensor() -> ContactSensorCfg:
 # ---------------------------------------------------------------------------
 
 
-def _build_actor_obs() -> dict[str, ObservationTermCfg]:
+def _build_actor_obs(
+    initial_action_rescale: float = 1.0,
+) -> dict[str, ObservationTermCfg]:
     """Actor observation terms matching the official HoST policy group.
 
     Uses custom wrappers that zero observations during the unactuated period
@@ -224,15 +235,18 @@ def _build_actor_obs() -> dict[str, ObservationTermCfg]:
         ),
         "action_rescale": ObservationTermCfg(
             func=mdp.action_rescale_obs,
+            params={"initial_rescale": initial_action_rescale},
             clip=(-5.0, 5.0),
         ),
     }
 
 
-def _build_critic_obs() -> dict[str, ObservationTermCfg]:
+def _build_critic_obs(
+    initial_action_rescale: float = 1.0,
+) -> dict[str, ObservationTermCfg]:
     """Critic observation = actor terms + full projected gravity (privileged)."""
     return {
-        **_build_actor_obs(),
+        **_build_actor_obs(initial_action_rescale),
         "projected_gravity_full": ObservationTermCfg(func=mdp.projected_gravity),
     }
 
@@ -263,31 +277,31 @@ def _build_rewards(
         ),
         # ---- Regularization ----
         "regu_dof_acc": RewardTermCfg(
-            func=mdp.reward_dof_acc, weight=-2.5e-7
+            func=mdp.reward_dof_acc, weight=-2.5e-8
         ),
         "regu_action_rate": RewardTermCfg(
-            func=mdp.reward_action_rate, weight=-0.01
+            func=mdp.reward_action_rate, weight=-0.001
         ),
         "regu_smoothness": RewardTermCfg(
-            func=mdp.reward_smoothness, weight=-0.01
+            func=mdp.reward_smoothness, weight=-0.001
         ),
         "regu_torques": RewardTermCfg(
-            func=mdp.reward_torques, weight=-2.5e-6
+            func=mdp.reward_torques, weight=-2.5e-7
         ),
         "regu_joint_power": RewardTermCfg(
-            func=mdp.reward_joint_power, weight=-2.5e-5
+            func=mdp.reward_joint_power, weight=-2.5e-6
         ),
         "regu_dof_vel": RewardTermCfg(
-            func=mdp.reward_dof_vel, weight=-1e-3
+            func=mdp.reward_dof_vel, weight=-1e-5
         ),
         "regu_joint_tracking_error": RewardTermCfg(
-            func=mdp.reward_joint_tracking_error, weight=-0.00025
+            func=mdp.reward_joint_tracking_error, weight=-0.025
         ),
         "regu_dof_pos_limits": RewardTermCfg(
-            func=mdp.reward_dof_pos_limits, weight=-100.0
+            func=mdp.reward_dof_pos_limits, weight=-10.0
         ),
         "regu_dof_vel_limits": RewardTermCfg(
-            func=mdp.reward_dof_vel_limits, weight=-1.0
+            func=mdp.reward_dof_vel_limits, weight=-0.1
         ),
         # ---- Style ----
         "style_waist_deviation": RewardTermCfg(
@@ -315,7 +329,9 @@ def _build_rewards(
             func=mdp.reward_shank_orientation, weight=10.0
         ),
         "style_ground_parallel": RewardTermCfg(
-            func=mdp.reward_ground_parallel, weight=20.0
+            # The MJCF has no ankle keypoint sites. Using one body per ankle
+            # makes the variance identically zero, so this term must stay off.
+            func=mdp.reward_ground_parallel, weight=0.0
         ),
         "style_feet_distance": RewardTermCfg(
             func=mdp.reward_feet_distance, weight=-10.0
@@ -365,6 +381,8 @@ def _build_rewards(
 def _build_events(
     unactuated_steps: int = 30,
     no_orientation: bool = False,
+    initial_force: float = 200.0,
+    initial_action_rescale: float = 1.0,
 ) -> dict[str, EventTermCfg]:
     return {
         # Reset
@@ -389,10 +407,11 @@ def _build_events(
             },
         ),
         "reset_robot_joints": EventTermCfg(
-            func=envs_mdp.reset_joints_by_offset,
+            func=mdp.reset_joints_scaled,
             mode="reset",
             params={
-                "position_range": (0.5, 1.5),
+                "scale_range": (0.9, 1.1),
+                "offset_range": (-0.05, 0.05),
                 "velocity_range": (0.0, 0.0),
                 "asset_cfg": _JOINT_ASSET_CFG,
             },
@@ -401,13 +420,22 @@ def _build_events(
             func=mdp.reset_last_last_action,
             mode="reset",
         ),
+        "reset_action_rescale": EventTermCfg(
+            func=mdp.reset_action_rescale,
+            mode="reset",
+            params={"initial_rescale": initial_action_rescale},
+        ),
+        "reset_standup_success": EventTermCfg(
+            func=mdp.reset_standup_success,
+            mode="reset",
+        ),
         # Interval — traction force (every step)
         "traction_force": EventTermCfg(
             func=mdp.apply_traction_force,
             mode="interval",
             interval_range_s=(0.0, 0.0),
             params={
-                "initial_force": 100.0,
+                "initial_force": initial_force,
                 "no_orientation": no_orientation,
                 "unactuated_steps": unactuated_steps,
             },
@@ -415,6 +443,11 @@ def _build_events(
         # Interval — update last-last-action buffer for smoothness (every step)
         "update_last_last_action": EventTermCfg(
             func=mdp.update_last_last_action,
+            mode="interval",
+            interval_range_s=(0.0, 0.0),
+        ),
+        "update_standup_success": EventTermCfg(
+            func=mdp.update_standup_success,
             mode="interval",
             interval_range_s=(0.0, 0.0),
         ),
@@ -475,6 +508,8 @@ def unitree_g1_host_env_cfg(
 
     feet_ground = _make_feet_contact_sensor()
     nonfeet_ground = _make_nonfeet_contact_sensor()
+    initial_force = 0.0 if play else 200.0
+    initial_action_rescale = 0.25 if play else 1.0
 
     cfg = ManagerBasedRlEnvCfg(
         decimation=4,
@@ -495,7 +530,7 @@ def unitree_g1_host_env_cfg(
             terrain=TerrainEntityCfg(terrain_type="plane"),
             entities={"robot": robot_cfg},
             sensors=(feet_ground, nonfeet_ground),
-            num_envs=1,
+            num_envs=2048,
             extent=2.5,
         ),
         episode_length_s=10.0,
@@ -503,13 +538,13 @@ def unitree_g1_host_env_cfg(
         scale_rewards_by_dt=True,
         observations={
             "actor": ObservationGroupCfg(
-                terms=_build_actor_obs(),
+                terms=_build_actor_obs(initial_action_rescale),
                 concatenate_terms=True,
                 enable_corruption=True,
                 history_length=6,
             ),
             "critic": ObservationGroupCfg(
-                terms=_build_critic_obs(),
+                terms=_build_critic_obs(initial_action_rescale),
                 concatenate_terms=True,
                 enable_corruption=False,
                 history_length=6,
@@ -518,9 +553,10 @@ def unitree_g1_host_env_cfg(
         actions={
             "joint_pos": mdp.RelativeJointPositionActionCfg(
                 entity_name="robot",
-                actuator_names=(".*",),
+                actuator_names=_POLICY_JOINT_NAMES,
                 scale=1.0,
                 unactuated_steps=unactuated_steps,
+                initial_rescale=initial_action_rescale,
                 clip={r".*": (-100.0, 100.0)},
             )
         },
@@ -528,6 +564,8 @@ def unitree_g1_host_env_cfg(
         events=_build_events(
             unactuated_steps=unactuated_steps,
             no_orientation=no_orientation,
+            initial_force=initial_force,
+            initial_action_rescale=initial_action_rescale,
         ),
         rewards=_build_rewards(
             task_weight=task_weight,
@@ -552,11 +590,12 @@ def unitree_g1_host_env_cfg(
             "traction_force": CurriculumTermCfg(
                 func=mdp.traction_force_curriculum,
                 params={
-                    "initial_force": 100.0,
+                    "initial_force": initial_force,
                     "force_decrement": 20.0,
                     "action_rescale_decrement": 0.02,
+                    "initial_action_rescale": initial_action_rescale,
                     "min_action_rescale": 0.25,
-                    "threshold_height": 0.9,
+                    "threshold_height": 0.65,
                 },
             ),
         },
@@ -586,11 +625,11 @@ def unitree_g1_host_env_cfg(
 
 
 def unitree_g1_ground_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-    """Ground start: crouching on flat ground, pitched forward."""
+    """Ground start: lying face-up (supine) on flat ground."""
     return unitree_g1_host_env_cfg(
         play=play,
         init_pos=(0.0, 0.0, 0.5),
-        init_quat=(1.0, 0.0, -1.0, 0.0),  # pitched forward
+        init_quat=(0.70710678, 0.0, -0.70710678, 0.0),
     )
 
 

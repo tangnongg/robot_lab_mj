@@ -28,6 +28,7 @@ def calibrate(
     num_episodes: int = 5,
     device: str = "cpu",
     seed: int = 42,
+    target_step_cost: float = 1.0,
 ) -> dict[str, float]:
     """Run falling episodes and report per‑term reward statistics."""
 
@@ -62,9 +63,12 @@ def calibrate(
             env.step(action)
 
             sr = rm._step_reward  # (B, n_terms)
-            raw_c = sr[:, idx_contact] / w_contact  # (B,)
-            raw_j = sr[:, idx_joint] / w_joint
-            raw_e = sr[:, idx_torque] / w_torque
+            # Impact functions return non-negative costs and their configured
+            # weights are negative. Convert the weighted reward rate back to a
+            # positive raw cost for an easier-to-read calibration report.
+            raw_c = -sr[:, idx_contact] / w_contact  # (B,)
+            raw_j = -sr[:, idx_joint] / w_joint
+            raw_e = -sr[:, idx_torque] / w_torque
 
             # Only keep non‑zero values (active impact phase).
             mask_c = raw_c.abs() > 0
@@ -81,6 +85,7 @@ def calibrate(
                 for v in raw_e[mask_e].cpu().tolist():
                     r_torque_vals.append(v)
 
+    step_dt = env.step_dt
     env.close()
 
     rc = np.array(r_contact_vals)
@@ -89,6 +94,8 @@ def calibrate(
 
     stats = {}
     for name, arr in [("r_contact", rc), ("r_joint", rj), ("r_torque", rt)]:
+        if arr.size == 0:
+            raise RuntimeError(f"{name} never became non-zero during calibration")
         stats[name] = {
             "mean": float(arr.mean()),
             "std": float(arr.std()),
@@ -97,17 +104,15 @@ def calibrate(
             "abs_mean": float(np.abs(arr).mean()),
         }
 
-    # Calibrated weights: normalise so each term contributes ~1/3
-    # after being multiplied.
+    # Choose each weight so a typical non-zero impact sample contributes
+    # target_step_cost after RewardManager's dt scaling.
     mag_c = stats["r_contact"]["abs_mean"]
     mag_j = stats["r_joint"]["abs_mean"]
     mag_e = stats["r_torque"]["abs_mean"]
-    total = mag_c + mag_j + mag_e
-
     weights = {
-        "w_c": total / (3.0 * max(mag_c, 1e-9)),
-        "w_j": total / (3.0 * max(mag_j, 1e-9)),
-        "w_e": total / (3.0 * max(mag_e, 1e-9)),
+        "w_c": target_step_cost / (step_dt * max(mag_c, 1e-9)),
+        "w_j": target_step_cost / (step_dt * max(mag_j, 1e-9)),
+        "w_e": target_step_cost / (step_dt * max(mag_e, 1e-9)),
     }
 
     # ── Print report ──
@@ -123,12 +128,12 @@ def calibrate(
         print(f"  {name:<14s} {s['mean']:10.4f} {s['std']:10.4f} "
               f"{s['abs_mean']:10.4f} {s['min']:10.4f} {s['max']:10.4f}")
     print()
-    print("  Calibrated weights (each term ~1/3 of total):")
+    print(f"  Calibrated weights (typical contribution ~{target_step_cost:g}/step):")
     for k, v in weights.items():
         print(f"    {k} = {v:.1e}")
     print()
     print("  Suggested env_cfgs.py snippet:")
-    print(f'    "r_contact": RewardTermCfg(func=mdp.reward_contact_force, '
+    print(f'    "r_contact": RewardTermCfg(func=mdp.ContactForcePenalty, '
           f'weight={-weights["w_c"]:.2e}),')
     print(f'    "r_joint":   RewardTermCfg(func=mdp.reward_joint_reaction, '
           f'weight={-weights["w_j"]:.2e}),')
@@ -147,6 +152,7 @@ if __name__ == "__main__":
     p.add_argument("--num-episodes", type=int, default=5)
     p.add_argument("--device", default="cpu")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--target-step-cost", type=float, default=1.0)
     args = p.parse_args()
     calibrate(
         task_id=args.task_id,
@@ -154,4 +160,5 @@ if __name__ == "__main__":
         num_episodes=args.num_episodes,
         device=args.device,
         seed=args.seed,
+        target_step_cost=args.target_step_cost,
     )

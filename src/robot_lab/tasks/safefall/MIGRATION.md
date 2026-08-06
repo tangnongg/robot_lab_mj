@@ -1,5 +1,11 @@
 # SafeFall Migration: IsaacLab → mjlab
 
+> **Archived migration snapshot.** The reward structure, observations, reset
+> distribution, termination conditions, and curriculum described below reflect
+> the initial port and are no longer the active configuration. See
+> [`PAPER_REVIEW.md`](PAPER_REVIEW.md) for the current implementation audit and
+> [`POLICY_TRAINING.md`](POLICY_TRAINING.md) for current commands.
+
 ## 1. Overview
 
 This document describes the migration of the SafeFall protective control training environment from IsaacLab (GPU PhysX-based) to mjlab (MuJoCo-Warp-based).

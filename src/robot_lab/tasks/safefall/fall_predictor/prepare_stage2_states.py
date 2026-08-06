@@ -10,7 +10,7 @@ This script:
      as "falling" (is_falling == True)
   3. For each flagged frame, extracts the full simulation state
      (root position/orientation/velocity + joint positions/velocities)
-  4. Filters invalid configurations (ground penetration, self-collision)
+  4. Filters states that are already too close to impact
   5. Saves a state bank to --output for use by the Stage II reset event
 
 Usage:
@@ -26,17 +26,14 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 
 _src = Path(__file__).resolve().parents[4]
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from robot_lab.tasks.safefall.fall_predictor.model import FallPredictor
 from robot_lab.tasks.safefall.fall_predictor.dataset import load_trajectory
-from robot_lab.tasks.safefall.env_cfgs import unitree_g1_safefall_env_cfg
-from mjlab.envs import ManagerBasedRlEnv
+from robot_lab.tasks.safefall.fall_predictor.model import FallPredictor
 
 
 def extract_stage2_states(
@@ -57,7 +54,7 @@ def extract_stage2_states(
     -------
     dict with keys:
       root_state  — (K, 13)  [x,y,z, qw,qx,qy,qz, vx,vy,vz, ωx,ωy,ωz]
-      joint_pos   — (K, 29)  default‑relative joint positions
+      joint_pos   — (K, 29)  absolute joint positions
       joint_vel   — (K, 29)  joint velocities
     """
     traj_dir = Path(traj_dir)
@@ -76,15 +73,6 @@ def extract_stage2_states(
     model.eval()
     print("Predictor loaded")
 
-    # Build a single-env safefall env to reconstruct full simulator state
-    # from trajectory observations.  The env is used *only* to read
-    # default joint positions; we do not step it.
-    env_cfg = unitree_g1_safefall_env_cfg(play=True)
-    env_cfg.scene.num_envs = 1
-    env = ManagerBasedRlEnv(env_cfg, device="cpu")
-    asset = env.scene["robot"]
-    default_jpos = asset.data.default_joint_pos[0]  # (29,)
-
     all_root: list[torch.Tensor] = []
     all_jpos: list[torch.Tensor] = []
     all_jvel: list[torch.Tensor] = []
@@ -94,6 +82,14 @@ def extract_stage2_states(
 
     for fi, fpath in enumerate(files):
         d = load_trajectory(fpath)
+        required_state = {"root_state", "joint_pos", "joint_vel"}
+        if not required_state.issubset(d) or d.get("state_schema_version", 0) < 2:
+            raise ValueError(
+                f"{fpath} has predictor observations but no exact simulator state. "
+                "Root height, linear velocity, and yaw cannot be reconstructed from "
+                "the 63-D predictor input. Recollect trajectories with the current "
+                "collector before building a Stage II bank."
+            )
         obs_seq = d["observations"]  # (T, 63)
         T = obs_seq.shape[0]
         total_frames += T
@@ -123,34 +119,11 @@ def extract_stage2_states(
             if not is_falling:
                 continue
 
-            # --- This frame is flagged as "falling" — extract state ---
-            # 63-D layout: pelvis(2), ang_vel(3), jpos_rel(29), jvel(29)
-            pelvis_rp = obs_seq[t, 0:2]      # roll, pitch
-            ang_vel = obs_seq[t, 2:5]          # body frame
-            jpos_rel = obs_seq[t, 5:34]        # relative to default
-            jvel = obs_seq[t, 34:63]           # absolute
-
-            # Reconstruct root quaternion from pelvis roll/pitch + zero yaw.
-            roll, pitch = pelvis_rp[0].item(), pelvis_rp[1].item()
-            cr, sr = np.cos(roll / 2), np.sin(roll / 2)
-            cp, sp = np.cos(pitch / 2), np.sin(pitch / 2)
-            qw = cr * cp
-            qx = sr * cp
-            qy = cr * sp
-            qz = -sr * sp
-            quat = torch.tensor([qw, qx, qy, qz])
-
-            # Root position: XY relative to env origin (zero is fine,
-            # env origins handle the offset).  Z stored as 0 — the
-            # Stage II reset function assigns a random height at
-            # runtime (matching the paper's [0.4, 0.9]m range).
-            root_state = torch.zeros(13)
-            root_state[0:3] = 0.0       # x,y,z (z filled at sample time)
-            root_state[3:7] = quat      # qw, qx, qy, qz
-            root_state[7:10] = 0.0      # linear vel (filled at sample time)
-            root_state[10:13] = ang_vel  # angular vel from trajectory
-
-            jpos_abs = jpos_rel + default_jpos
+            root_state = d["root_state"][t].clone()
+            jpos_abs = d["joint_pos"][t].clone()
+            jvel = d["joint_vel"][t].clone()
+            if not (min_height <= float(root_state[2]) <= max_height):
+                continue
 
             # Simple validity filter: reject extreme joint positions.
             if jpos_abs.abs().max() > 5.0:
@@ -163,8 +136,6 @@ def extract_stage2_states(
 
         if (fi + 1) % 500 == 0:
             print(f"  {fi+1}/{len(files)} trajs, {total_flagged} flagged so far")
-
-    env.close()
 
     if not all_root:
         raise RuntimeError("No falling states extracted — check predictor/threshold.")
@@ -182,6 +153,7 @@ def extract_stage2_states(
         "joint_pos": joint_pos_bank,
         "joint_vel": joint_vel_bank,
         "K": len(all_root),
+        "state_schema_version": 2,
     }
     torch.save(data, output_path)
     print(f"Saved to {output_path}")

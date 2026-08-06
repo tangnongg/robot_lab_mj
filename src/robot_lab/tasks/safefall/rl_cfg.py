@@ -29,16 +29,26 @@ def unitree_g1_safefall_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     """
     return RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
+            # Phase is inferred from IMU/joint dynamics by this recurrent actor;
+            # no contact or phase label is passed at inference time.
+            class_name="RNNModel",
+            rnn_type="gru",
+            rnn_hidden_dim=128,
+            rnn_num_layers=1,
             hidden_dims=(256, 256, 128),
             activation="elu",
             obs_normalization=False,
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
+                "std_range": (1.0e-3, 2.0),
                 "std_type": "scalar",
             },
         ),
         critic=RslRlModelCfg(
+            # Two independent value heads selected from the critic-only phase
+            # group.  The shared actor remains phase-agnostic.
+            class_name="robot_lab.tasks.safefall.two_phase_rl:TwoPhaseCritic",
             hidden_dims=(512, 256, 128),
             activation="elu",
             obs_normalization=False,
@@ -61,8 +71,12 @@ def unitree_g1_safefall_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         save_interval=500,
         num_steps_per_env=40,                   # Paper: 40 steps per episode
         max_iterations=5000,
+        clip_actions=10.0,  # Absolute targets are clipped per joint by the env.
         # Asymmetric actor-critic (paper Section III-D):
         #   actor  → deployable sensor measurements (noisy)
         #   critic → actor terms (clean) + privileged root pos/vel/CoM
-        obs_groups={"actor": ("actor",), "critic": ("critic",)},
+        obs_groups={
+            "actor": ("actor",),
+            "critic": ("critic", "critic_phase"),
+        },
     )

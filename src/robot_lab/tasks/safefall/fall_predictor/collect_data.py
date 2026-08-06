@@ -431,11 +431,31 @@ def collect_trajectories(
     obs_dict, _ = env.reset()
     _apply_batch_dr(env, states, dr_actuator, dr_body,
                 _robot_cfg, _root_body_cfg, device)
+
+    def _full_state_batch():
+        root = torch.cat(
+            [
+                asset.data.root_link_pos_w,
+                asset.data.root_link_quat_w,
+                asset.data.root_link_vel_w,
+            ],
+            dim=-1,
+        ).detach().cpu()
+        root[:, 0:3] -= env.scene.env_origins.detach().cpu()
+        return (
+            root,
+            asset.data.joint_pos.detach().cpu(),
+            asset.data.joint_vel.detach().cpu(),
+        )
+
     frame_batch = extract_predictor_input(env).detach().cpu()  # (N, 63)
+    root_batch, joint_pos_batch, joint_vel_batch = _full_state_batch()
     for i in range(N):
-        states[i].writer.add_from_batch(frame_batch)
+        states[i].writer.add_from_batch(
+            frame_batch, root_batch, joint_pos_batch, joint_vel_batch
+        )
         states[i].init_h = asset.data.root_link_pos_w[i, 2].item()
-    del frame_batch
+    del frame_batch, root_batch, joint_pos_batch, joint_vel_batch
     _sync_viewer()
 
     stats = CollectStats(start_time=time.time())
@@ -513,9 +533,12 @@ def collect_trajectories(
 
         # Extract predictor input ONCE for all envs (not N× per step).
         frame_batch = extract_predictor_input(env).detach().cpu()  # (N, 63)
+        root_batch, joint_pos_batch, joint_vel_batch = _full_state_batch()
         for i in range(N):
-            states[i].writer.add_from_batch(frame_batch)
-        del frame_batch  # free CPU memory promptly
+            states[i].writer.add_from_batch(
+                frame_batch, root_batch, joint_pos_batch, joint_vel_batch
+            )
+        del frame_batch, root_batch, joint_pos_batch, joint_vel_batch
         _sync_viewer()
 
         # --- Detect falls, max‑steps, reset finished envs ---
@@ -587,11 +610,14 @@ def collect_trajectories(
                             _robot_cfg, _root_body_cfg, device,
                             env_ids=done_ids)
             frame_batch_r = extract_predictor_input(env).detach().cpu()
+            root_batch, joint_pos_batch, joint_vel_batch = _full_state_batch()
             for i in done_ids.cpu().tolist():
                 s = states[i]
-                s.writer.add_from_batch(frame_batch_r)
+                s.writer.add_from_batch(
+                    frame_batch_r, root_batch, joint_pos_batch, joint_vel_batch
+                )
                 s.init_h = asset.data.root_link_pos_w[i, 2].item()
-            del frame_batch_r
+            del frame_batch_r, root_batch, joint_pos_batch, joint_vel_batch
             _sync_viewer()
 
             # Release cached GPU memory back to the OS after each batch

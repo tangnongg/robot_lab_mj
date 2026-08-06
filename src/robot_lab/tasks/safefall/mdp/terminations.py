@@ -47,3 +47,23 @@ def joint_velocity_exceeded(
     asset: Entity = env.scene[asset_cfg.name]
     max_vel = torch.max(torch.abs(asset.data.joint_vel), dim=-1)[0]
     return max_vel > threshold
+
+
+def simulation_state_invalid(
+    env: ManagerBasedRlEnv,
+    max_abs_qpos: float = 1.0e3,
+    max_abs_qvel: float = 200.0,
+) -> torch.Tensor:
+    """Detect non-finite or non-physical simulator state.
+
+    This is a numerical safety boundary, not a task-success termination. A state
+    beyond these limits has already left the mechanically meaningful regime and
+    otherwise produces unbounded squared impact costs before the next observation.
+    """
+    qpos = env.sim.data.qpos
+    qvel = env.sim.data.qvel
+    finite = torch.isfinite(qpos).all(dim=-1) & torch.isfinite(qvel).all(dim=-1)
+    bounded = (qpos.abs().amax(dim=-1) <= max_abs_qpos) & (
+        qvel.abs().amax(dim=-1) <= max_abs_qvel
+    )
+    return ~(finite & bounded)

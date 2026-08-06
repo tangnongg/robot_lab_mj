@@ -33,6 +33,7 @@ from mjlab.envs.mdp.observations import (
     projected_gravity,
 )
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -46,6 +47,7 @@ from mjlab.viewer import ViewerConfig
 
 from robot_lab.asset_zoo.robots.unitree_g1.g1_constants import (
     FULL_COLLISION,
+    FULL_COLLISION_WITHOUT_SELF,
     G1_ACTUATOR_4010,
     G1_ACTUATOR_5020,
     G1_ACTUATOR_7520_14,
@@ -143,30 +145,69 @@ _SAFEFALL_ARTICULATION = EntityArticulationInfoCfg(
 
 _JOINT_ASSET_CFG = SceneEntityCfg("robot", joint_names=(".*_joint",))
 
+# Absolute PD target bounds from the G1 MJCF. The policy outputs default-relative
+# targets, then JointPositionAction clips the processed target to these limits.
+_ACTION_TARGET_LIMITS = {
+    ".*_hip_pitch_joint": (-2.5307, 2.8798),
+    "left_hip_roll_joint": (-0.5236, 2.9671),
+    "right_hip_roll_joint": (-2.9671, 0.5236),
+    ".*_hip_yaw_joint": (-2.7576, 2.7576),
+    ".*_knee_joint": (-0.087267, 2.8798),
+    ".*_ankle_pitch_joint": (-0.87267, 0.5236),
+    ".*_ankle_roll_joint": (-0.2618, 0.2618),
+    "waist_yaw_joint": (-2.618, 2.618),
+    "waist_roll_joint": (-0.52, 0.52),
+    "waist_pitch_joint": (-0.52, 0.52),
+    ".*_shoulder_pitch_joint": (-3.0892, 2.6704),
+    "left_shoulder_roll_joint": (-1.5882, 2.2515),
+    "right_shoulder_roll_joint": (-2.2515, 1.5882),
+    ".*_shoulder_yaw_joint": (-2.618, 2.618),
+    ".*_elbow_joint": (-1.0472, 2.0944),
+    ".*_wrist_roll_joint": (-1.97222, 1.97222),
+    ".*_wrist_pitch_joint": (-1.61443, 1.61443),
+    ".*_wrist_yaw_joint": (-1.61443, 1.61443),
+}
+
 
 # ---------------------------------------------------------------------------
 # Contact sensor — paper r_contact (Eq.3)
 # ---------------------------------------------------------------------------
 
 def _make_contact_sensor() -> ContactSensorCfg:
-    """Match all robot non-foot collision geoms against the terrain.
+    """Track ground and non-adjacent self contacts for every collision geom.
 
-    Uses ``reduce="none"`` so each geom's individual 3D contact force
-    is preserved in the output — needed for the component-heterogeneity
-    weights in Eq.3.
+    ``reduce="netforce"`` keeps one force vector per geom, and four samples
+    retain the complete 200 Hz interval covered by one policy step.
     """
     return ContactSensorCfg(
         name="body_ground_contact",
         primary=ContactMatch(
             mode="geom",
-            pattern=r".*(?:hip|thigh|shin|knee|torso|head|shoulder|elbow|wrist|hand|pelvis|linkage_brace).*_collision\d*$",
+            pattern=r".*_collision$",
+            entity="robot",
+        ),
+        secondary=None,
+        fields=("found", "force"),
+        reduce="netforce",
+        num_slots=1,
+        history_length=4,
+    )
+
+
+def _make_ground_contact_sensor() -> ContactSensorCfg:
+    """Track only robot-terrain contact for post-impact settling rewards."""
+    return ContactSensorCfg(
+        name="ground_contact",
+        primary=ContactMatch(
+            mode="geom",
+            pattern=r".*_collision$",
             entity="robot",
         ),
         secondary=ContactMatch(mode="body", pattern="terrain"),
         fields=("found", "force"),
-        reduce="none",
+        reduce="netforce",
         num_slots=1,
-        history_length=1,
+        history_length=4,
     )
 
 
@@ -228,6 +269,16 @@ def _build_actor_obs() -> dict[str, ObservationTermCfg]:
             noise=Unoise(n_min=-0.2 * 0.25, n_max=0.2 * 0.25),
             clip=(-50.0, 50.0),
         ),
+        # A real IMU measures the contact impulse directly.  This is still
+        # proprioception (unlike the simulator-only terrain contact label) and
+        # lets the recurrent actor infer the impact-to-hold transition.
+        "base_lin_acc": ObservationTermCfg(
+            func=envs_mdp.builtin_sensor,
+            params={"sensor_name": "robot/imu_lin_acc"},
+            scale=0.05,
+            noise=Unoise(n_min=-0.3, n_max=0.3),
+            clip=(-50.0, 50.0),
+        ),
         "projected_gravity": ObservationTermCfg(
             func=projected_gravity,
             noise=Unoise(n_min=-0.05, n_max=0.05),
@@ -263,6 +314,11 @@ def _build_critic_obs() -> dict[str, ObservationTermCfg]:
         # Actor terms (no noise — critic sees ground truth)
         "pelvis_orientation": ObservationTermCfg(func=mdp.pelvis_orientation),
         "base_ang_vel": ObservationTermCfg(func=base_ang_vel, scale=0.25),
+        "base_lin_acc": ObservationTermCfg(
+            func=envs_mdp.builtin_sensor,
+            params={"sensor_name": "robot/imu_lin_acc"},
+            scale=0.05,
+        ),
         "projected_gravity": ObservationTermCfg(func=projected_gravity),
         "joint_pos": ObservationTermCfg(
             func=joint_pos_rel, params={"asset_cfg": _JOINT_ASSET_CFG},
@@ -279,6 +335,15 @@ def _build_critic_obs() -> dict[str, ObservationTermCfg]:
     }
 
 
+def _build_critic_phase_obs() -> dict[str, ObservationTermCfg]:
+    """Training-only phase label consumed by :class:`TwoPhaseCritic`.
+
+    It is intentionally a separate observation group so ``actor`` never sees
+    it, even though PPO receives it for value estimation.
+    """
+    return {"phase": ObservationTermCfg(func=mdp.post_impact_phase)}
+
+
 # ---------------------------------------------------------------------------
 # Privileged observation helpers (not importable on real hardware)
 # ---------------------------------------------------------------------------
@@ -287,7 +352,7 @@ def _privileged_root_pos(
     env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
     """Global root position (privileged)."""
-    return env.scene[asset_cfg.name].data.root_link_pos_w
+    return env.scene[asset_cfg.name].data.root_link_pos_w - env.scene.env_origins
 
 
 def _privileged_root_lin_vel(
@@ -301,7 +366,7 @@ def _privileged_root_com(
     env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
     """Center of mass position in world frame (privileged)."""
-    return env.scene[asset_cfg.name].data.root_com_pos_w
+    return env.scene[asset_cfg.name].data.root_com_pos_w - env.scene.env_origins
 
 
 # ---------------------------------------------------------------------------
@@ -312,20 +377,20 @@ def _privileged_root_com(
 def _build_rewards() -> dict[str, RewardTermCfg]:
     return {
         # -- r_impact (Eq.2): w_c·r_contact + w_j·r_joint + w_e·r_torque --
-        # r_contact (Eq.3): ContactSensor not providing force data yet.
+        # r_contact (Eq.3): component-weighted per-geom contact force.
         "r_contact": RewardTermCfg(
-            func=mdp.reward_contact_force,
-            weight=-1.0,  # w_c — placeholder; sensor forces unavailable
+            func=mdp.ContactForcePenalty,
+            weight=-3.0e-8,
         ),
-        # r_joint (Eq.4): qfrc_external proxy
+        # r_joint (Eq.4): cfrc_int reaction force at each joint body.
         "r_joint": RewardTermCfg(
             func=mdp.reward_joint_reaction,
-            weight=-5.0e-7,  # w_j — qfrc_external can reach hundreds of N·m
+            weight=-2.0e-5,
         ),
         # r_torque (Eq.5): normalized torque ratio
         "r_torque": RewardTermCfg(
             func=mdp.reward_joint_torques,
-            weight=-2.5e-6,  # w_e — per‑joint ratio already in [0, 1] range
+            weight=-1.5,
         ),
         # -- r_regulation --
         "action_rate": RewardTermCfg(
@@ -344,6 +409,60 @@ def _build_rewards() -> dict[str, RewardTermCfg]:
             func=mdp.reward_joint_pos_limits,
             weight=-10.0,
         ),
+        # Numerical safety only. At the default dt this is a -100 terminal cost,
+        # so deliberately destabilizing the simulation cannot improve return.
+        "simulation_failure": RewardTermCfg(
+            func=mdp.reward_simulation_failure,
+            weight=-5000.0,
+        ),
+        # Keep the robot quiet after it has contacted the terrain and settled.
+        "post_fall_stability": RewardTermCfg(
+            func=mdp.reward_post_fall_stability,
+            weight=4.0,
+            params={},
+        ),
+        "post_fall_motion": RewardTermCfg(
+            func=mdp.penalty_post_fall_motion,
+            weight=-0.02,
+            params={},
+        ),
+        # After a short impact-absorption window, hold the naturally derived
+        # pose instead of chasing a hand-designed posture.
+        "post_fall_pose_drift": RewardTermCfg(
+            func=mdp.penalty_post_fall_pose_drift,
+            weight=-0.15,
+            params={},
+        ),
+        "post_fall_action_drift": RewardTermCfg(
+            func=mdp.penalty_post_fall_action_drift,
+            weight=-0.05,
+            params={},
+        ),
+    }
+
+
+def _build_metrics() -> dict[str, MetricsTermCfg]:
+    return {
+        "impact_load": MetricsTermCfg(
+            func=mdp.ImpactLoadAccumulator,
+            params={"joint_force_threshold": 500.0},
+            per_substep=True,
+        ),
+        "settling_motion": MetricsTermCfg(
+            func=mdp.SettlingMotionAccumulator,
+            params={
+                "force_threshold": 20.0,
+                "settle_ratio": 0.1,
+                "lin_floor": 0.15,
+                "ang_floor": 0.5,
+                "joint_floor": 0.5,
+                "settle_substeps": 20,
+                # 30 physics steps = 0.15 s at 200 Hz.  During this window
+                # the policy can still absorb and redistribute impact energy.
+                "pose_lock_delay_substeps": 30,
+            },
+            per_substep=True,
+        ),
     }
 
 
@@ -355,13 +474,9 @@ def _build_rewards() -> dict[str, RewardTermCfg]:
 def _build_terminations() -> dict[str, TerminationTermCfg]:
     return {
         "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
-        "fall_completed": TerminationTermCfg(
-            func=mdp.fall_completed,
-            params={"height_threshold": 0.15, "velocity_threshold": 0.3},
-        ),
-        "joint_vel_exceeded": TerminationTermCfg(
-            func=mdp.joint_velocity_exceeded,
-            params={"threshold": 200.0},
+        "simulation_invalid": TerminationTermCfg(
+            func=mdp.simulation_state_invalid,
+            params={"max_abs_qpos": 1.0e3, "max_abs_qvel": 200.0},
         ),
     }
 
@@ -387,9 +502,10 @@ def _build_reset_event(stage2: bool = False) -> EventTermCfg:
         func=mdp.reset_falling_state,
         mode="reset",
         params={
-            "height_range": (0.4, 0.9),
-            "vel_range": (0.0, 2.0),
-            "ang_vel_range": (-1.0, 1.0),
+            "height_range": (1.0, 1.2),
+            "horizontal_speed_range": (0.0, 2.0),
+            "downward_speed_range": (-3.0, -1.5),
+            "ang_vel_range": (-3.0, 3.0),
         },
     )
 
@@ -420,13 +536,15 @@ def _build_events(stage2: bool = False) -> dict[str, EventTermCfg]:
         #     mode="startup",
         #     params={...},
         # ),
-        # 3 — Base mass offset  U(−1.0, 3.0) kg (log‑uniform approximation)
+        # 3 — Base mass offset  U(−1.0, 3.0) kg
         "dr_03_mass": EventTermCfg(
-            func=dr_body.pseudo_inertia,
+            func=dr_body.body_mass,
             mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=()),
-                "alpha_range": (-0.1, 0.1),  # mass scale ~ exp(2α)
+                "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
+                "ranges": (-1.0, 3.0),
+                "distribution": "uniform",
+                "operation": "add",
             },
         ),
         # 4 — Base CoM offset  x,y~U(−0.05,0.05), z~U(−0.01,0.01)
@@ -434,7 +552,7 @@ def _build_events(stage2: bool = False) -> dict[str, EventTermCfg]:
             func=dr_body.body_com_offset,
             mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+                "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
                 "ranges": {0: (-0.05, 0.05), 1: (-0.05, 0.05), 2: (-0.01, 0.01)},
                 "distribution": "uniform",
                 "operation": "add",
@@ -490,9 +608,9 @@ def unitree_g1_safefall_env_cfg(
             (predictor-flagged falling states) instead of random configs.
     """
     base_robot_cfg = get_g1_robot_cfg()
-    # Both stages use full collision geometry so the ContactSensor
-    # for r_contact (Eq.3) always works.
-    collisions = (FULL_COLLISION,)
+    # Stage I removes self-collision constraints for faster broad exploration;
+    # Stage II restores the full model for realistic refinement.
+    collisions = (FULL_COLLISION if stage2 else FULL_COLLISION_WITHOUT_SELF,)
     robot_cfg = EntityCfg(
         init_state=_SAFEFALL_STANDING_INIT,
         spec_fn=base_robot_cfg.spec_fn,
@@ -519,25 +637,33 @@ def unitree_g1_safefall_env_cfg(
         scene=SceneCfg(
             terrain=TerrainEntityCfg(terrain_type="plane"),
             entities={"robot": robot_cfg},
-            sensors=(_make_contact_sensor(),),
+            sensors=(_make_contact_sensor(), _make_ground_contact_sensor()),
             num_envs=4096,
             extent=2.5,
         ),
         episode_length_s=0.8,             # Paper: fixed 40 steps at 50 Hz
-        is_finite_horizon=False,
+        is_finite_horizon=True,
         scale_rewards_by_dt=True,
         observations={
             "actor": ObservationGroupCfg(
                 terms=_build_actor_obs(),
                 concatenate_terms=True,
                 enable_corruption=True,
-                history_length=5,         # Paper: 5-frame temporal context
+                # Temporal context is held by the GRU actor.  Do not pass a
+                # training-only phase flag to this deployable observation.
+                history_length=1,
             ),
             "critic": ObservationGroupCfg(
                 terms=_build_critic_obs(),
                 concatenate_terms=True,
                 enable_corruption=False,  # Critic sees clean privileged info
-                history_length=5,
+                history_length=1,
+            ),
+            "critic_phase": ObservationGroupCfg(
+                terms=_build_critic_phase_obs(),
+                concatenate_terms=True,
+                enable_corruption=False,
+                history_length=1,
             ),
         },
         actions={
@@ -546,12 +672,14 @@ def unitree_g1_safefall_env_cfg(
                 actuator_names=(".*",),
                 scale=1.0,
                 use_default_offset=True,
+                clip=_ACTION_TARGET_LIMITS,
             )
         },
         commands={},
         events=_build_events(stage2=stage2),
         rewards=_build_rewards(),
         terminations=_build_terminations(),
+        metrics=_build_metrics(),
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.ASSET_BODY,
             entity_name="robot",

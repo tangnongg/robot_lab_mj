@@ -1,0 +1,24 @@
+{
+  "contact_step": 8,
+  "contact_time_s": 0.16,
+  "settled_step_5_policy_steps": 95,
+  "settled_time_s": 1.9000000000000001,
+  "limits": {
+    "root_lin_speed": 0.41220121383666997,
+    "root_ang_speed": 2.084541893005371,
+    "joint_vel_rms": 1.284006977081299
+  },
+  "precontact_peaks": {
+    "root_lin_speed": 4.122012138366699,
+    "root_ang_speed": 20.84541893005371,
+    "joint_vel_rms": 12.840069770812988
+  },
+  "tail20_mean": {
+    "root_lin_speed": 0.0020432767923921347,
+    "root_ang_speed": 0.016062814742326736,
+    "joint_vel_rms": 0.03489787131547928,
+    "body_lin_speed_max": 0.02088039182126522,
+    "body_ang_speed_max": 0.20885534584522247,
+    "joint_acc_rms": 1.349316954612732
+  }
+}

@@ -31,7 +31,7 @@ mean_best_upright_time=8.3929 s
 logs/rsl_rl/g1_host_ground/2026-07-28_22-54-13_supine_v3_latched/model_799.pt
 ```
 
-本实现不是论文全部能力的等价复现。论文使用多 critic 和 L2C2，并覆盖多种地形/姿态；当前 MJLab 实现使用单 critic，针对奖励尺度做了重新平衡，并只验证 Ground 仰卧起身。G1 MJCF 也缺少论文中部分脚踝 keypoint，因此不能机械照搬所有奖励。
+本实现不是论文全部能力的等价复现。论文使用多 critic 和 L2C2，并覆盖多种地形/姿态；当前 MJLab 实现使用单 critic，针对奖励尺度做了重新平衡，并只验证 Ground 仰卧起身。初版 G1 MJCF 缺少论文中的脚踝 keypoint；当前版本已经在每个 `ankle_roll_link` 上补充中心、前、后、左、右五个共面无碰撞 site，并据此实现 `reward_ankle_parallel`。
 
 ## 2. 总体方法：建立证据链，而不是盲目调参
 
@@ -265,17 +265,23 @@ lower bound = 0 N
 
 由 `exp(-20 * abs(error))` 改为论文式高斯形态 `exp(-20 * error^2)`，使目标附近的梯度更平滑。
 
-#### 3.7.4 ground-parallel reward 是恒定伪奖励
+#### 3.7.4 ground-parallel reward 曾是恒定伪奖励
 
-论文基于每只脚多个 ankle keypoint 的高度方差评估脚掌是否平行地面。当前 MJCF 每侧只有一个可用 ankle body；单点方差恒为 0，reward 恒为正，完全不能区分动作好坏。
+论文基于每只脚多个 ankle keypoint 的高度方差评估脚掌是否平行地面。初版 MJCF 每侧只有一个可用 ankle body；单点方差恒为 0，reward 恒为正，完全不能区分动作好坏。
 
-处理方式不是“调低权重”，而是关闭该项：
+排障时先关闭该项，避免恒定伪奖励进入总回报：
 
 ```text
 style_ground_parallel weight = 0
 ```
 
-如果将来补充多个可靠 foot site，再恢复该奖励。
+当前版本以脚掌碰撞几何中心附近已有的 foot site `(0.04, 0, -0.037)` 为中心，在每个 `ankle_roll_link` 的脚掌平面定义严格相交的十字形五点：中心 `(0.04, 0, -0.037)`、前 `(0.2, 0, -0.037)`、后 `(-0.15, 0, -0.037)`、左 `(0.04, 0.1, -0.037)`、右 `(0.04, -0.1, -0.037)`。前后长度不对称对应脚掌相对踝轴的不对称几何。透明 site 不含 geom，不参与碰撞、质量或惯量计算。`reward_ankle_parallel` 分别计算左右五点世界坐标高度乘 10 后的样本方差，再取双脚平均值；方差小于 `0.05` 时奖励 1，否则为 0。Ground 配置还要求骨盆高度超过 `0.65 m` 才发放该奖励，避免单 critic 策略通过跪地保持脚掌水平来取得高分。配置项现为：
+
+```text
+style_ankle_parallel weight = 20
+```
+
+几何单元测试中，水平脚掌方差为 `0`；双脚 ankle pitch 设为 `0.5 rad` 后方差为 `0.353508`，超过阈值。这证明该项能够区分水平与倾斜脚掌，不再是常数。
 
 #### 3.7.5 单 critic 下奖励尺度失衡
 
@@ -295,7 +301,9 @@ style_ground_parallel weight = 0
 
 **根因一：资产映射错误**
 
-论文用真实 head height 达标作为课程条件。MJCF 没有对应的独立 head body，使用 `torso_link - feet` 再套用论文 head threshold，使条件在当前几何定义下很难达到。
+论文用真实 head height 达标作为课程条件。当前 MJCF 的 `head_link` 是附着在
+`torso_link` 上的 mesh，而不是独立 body；因此在 torso 内部增加了一个透明的
+`head_link` site，使用该 site 的世界高度作为头部高度测量点，不引入额外质量或碰撞。
 
 **根因二：只看回合最后一帧**
 
@@ -310,7 +318,7 @@ style_ground_parallel weight = 0
    projected_gravity_z < -0.8
    ```
 
-2. 每步更新 `host_standup_success` latch；一旦满足，本回合保持为 true，reset 时课程读取 latch。
+2. 每步检查直立条件；单个 control step 满足后更新 `host_standup_success` latch，一旦满足，本回合保持为 true，reset 时课程读取 latch。这个瞬时确认只证明机器人进入站立区域，不承担持续站立判定。
 3. 每回合 reset latch，避免成功状态泄漏到下一回合。
 
 **训练证据**
@@ -327,7 +335,7 @@ success_rate ~= 0.14
 
 **经验**
 
-课程条件服务于“是否允许提高难度”，最终评估条件服务于“是否稳定完成任务”，两者可以不同。课程可以 latch 一次到达，最终验收则必须要求持续站立。
+课程条件服务于“是否允许提高难度”，最终评估条件服务于“是否稳定完成任务”，两者可以不同。课程只需确认机器人短暂进入站立区域即可 latch，使牵引力和动作尺度继续下降；持续站立、目标姿态和完全静止由 post-task 奖励及最终评估负责。最终验收仍必须要求持续静止站立。
 
 ### 3.9 训练探索噪声在后期过强
 
@@ -580,6 +588,18 @@ projected_gravity_z < -0.9
 
 同时输出最长连续直立时间，避免短时跨过阈值被误认为稳定站立。
 
+当前评估将“保持站立”和“保持静止”分开报告。默认均要求连续 5 秒；静止还要求：
+
+```text
+全轴躯干角速度 < 0.5 rad/s
+躯干水平速度 < 0.5 m/s
+双脚平均水平速度 < 0.2 m/s
+```
+
+其中 `success_rate` 是持续直立成功率，`stable_success_rate` 才是静止站立成功率；同时报告两种最长连续时间以及站立阶段的平均 yaw、全轴角速度、躯干平移速度和脚部速度。
+
+当策略能持续直立却持续绕竖直轴旋转时，只靠 `exp(-k||omega||^2)` 容易给旋转状态保留较高分数。实现同时保留逐轴的正向全轴角速度奖励，并增加仅在站立后生效的、有界 `yaw_rate^2` 代价。它直接拉开 `1--2 rad/s` 旋转与接近零 yaw 速度之间的回报差；代价在极端速度处截断，避免一次跌倒的瞬态主导整个起身任务。
+
 ### 6.2 批量评估命令
 
 ```bash
@@ -693,7 +713,7 @@ logs/rsl_rl/g1_host_ground/2026-07-28_22-54-13_supine_v3_latched/videos/play/rl-
 
 1. **先修语义，再调超参数。** 29/23 DoF、reset range 和 PD target 错误都不是 PPO 调参可以弥补的。
 2. **失败的对照实验很有价值。** `model_400 + beta=0.25` 的 0% 和 `model_100 + force=0` 的 0%，分别证明了 action curriculum 和 force curriculum 确实在工作。
-3. **资产映射必须重新定义可达指标。** 缺少 head body 或 ankle keypoint 时，应选择可解释的替代量或关闭奖励，不能保留形式相同但物理意义为空的代码。
+3. **资产映射必须重新定义可达指标。** 缺少 head body 或 ankle keypoint 时，应补充无碰撞测量点、选择可解释的替代量或关闭奖励，不能保留形式相同但物理意义为空的代码。
 4. **课程成功不等于最终成功。** latch 适合推动课程，但验收必须要求持续站立。
 5. **checkpoint 不等于完整系统状态。** 网络、环境 buffer 和 play 默认值必须分别验证。
 6. **最终证据必须跨越训练、评估和部署三条链路。** reward 上升、批量数值成功、标准 play 完整回放缺一不可。

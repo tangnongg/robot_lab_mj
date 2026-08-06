@@ -6,16 +6,10 @@ Implements the damage-aware reward from the SafeFall paper (Meng et al., 2025):
 
   r_impact = w_c * r_contact + w_j * r_joint + w_e * r_torque
 
-Where:
-- r_contact (Eq.3): Per-link contact forces with component heterogeneity weights.
-  Not implemented (requires contact sensor with per-body force data).
-- r_joint (Eq.4): Joint reaction force penalty with per-joint mechanical thresholds.
-  Approximated via qfrc_external (body wrench contribution to joint space).
-- r_torque (Eq.5): Normalized torque ratio [|τ_i|/τ̄_i − 1]_+², preventing
-  actuator saturation and mechanical stress.
-
-Proxy rewards (not in paper, compensate for missing r_contact):
-  protect_head, body_orientation, energy_absorption, base_lin_vel
+Impact and regularization functions return non-negative costs and use negative
+weights. The post-fall settling function is the exception: it returns a
+bounded positive score after terrain contact, paired with a residual-motion
+cost so the final body state is quiet.
 
 Migrated from IsaacLab to mjlab. Key API changes:
 - asset.data.applied_torque → asset.data.qfrc_actuator
@@ -25,36 +19,34 @@ Migrated from IsaacLab to mjlab. Key API changes:
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import torch
 from mjlab.entity import Entity
+from mjlab.managers.manager_base import ManagerTermBase
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+from .metrics import ImpactLoadAccumulator
+from .terminations import simulation_state_invalid
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
-# ---------------------------------------------------------------------------
-# Per-joint max rated torque (τ̄_i) for the G1 — derived from actuator
-# effort_limit values in g1_constants.py.  Joint order matches the mjlab
-# G1 MJCF (29 DoF enumerated by Entity.joint_names).
-# ---------------------------------------------------------------------------
-# left_hip_pitch/roll/yaw, left_knee, left_ankle_pitch/roll,
-# right_hip_pitch/roll/yaw, right_knee, right_ankle_pitch/roll,
-# waist_yaw/roll/pitch,
-# left_shoulder_pitch/roll/yaw, left_elbow, left_wrist_roll/pitch/yaw,
-# right_shoulder_pitch/roll/yaw, right_elbow, right_wrist_roll/pitch/yaw
-_MAX_TORQUE = torch.tensor(
-    [
-        88.0, 139.0, 88.0, 139.0, 50.0, 50.0,   # left leg
-        88.0, 139.0, 88.0, 139.0, 50.0, 50.0,   # right leg
-        88.0, 50.0, 50.0,                        # waist
-        25.0, 25.0, 25.0, 25.0, 25.0, 5.0, 5.0, # left arm
-        25.0, 25.0, 25.0, 25.0, 25.0, 5.0, 5.0, # right arm
-    ]
-)
+
+def _stable_cost(
+    env: ManagerBasedRlEnv,
+    cost: torch.Tensor,
+    max_cost: float,
+) -> torch.Tensor:
+    """Bound non-physical tails and clear costs for states being reset."""
+    stable = ~simulation_state_invalid(env)
+    return torch.nan_to_num(cost, nan=0.0, posinf=max_cost, neginf=0.0).clamp(
+        min=0.0, max=max_cost
+    ) * stable
 
 # ---------------------------------------------------------------------------
 # Component heterogeneity weights (paper §III-D, Eq.3)
@@ -77,6 +69,11 @@ _GEOM_VULNERABILITY: dict[str, float] = {
     "right_shin_collision": _VULNERABILITY_MED,
     "left_shoulder_yaw_collision": _VULNERABILITY_MED,
     "right_shoulder_yaw_collision": _VULNERABILITY_MED,
+    **{
+        f"{side}_foot{i}_collision": _VULNERABILITY_MED
+        for side in ("left", "right")
+        for i in range(1, 8)
+    },
     # low
     "torso_collision": _VULNERABILITY_LOW,
     "pelvis_collision": _VULNERABILITY_LOW,
@@ -100,64 +97,114 @@ _GEOM_VULNERABILITY: dict[str, float] = {
 # ---------------------------------------------------------------------------
 
 
-def reward_contact_force(
-    env: ManagerBasedRlEnv,
-    alpha: float = 0.3,
-    sensor_name: str = "body_ground_contact",
-) -> torch.Tensor:
+class ContactForcePenalty(ManagerTermBase):
     """Per‑link contact force penalty with component heterogeneity weights.
 
     Reads per‑geom contact forces from a ContactSensor and applies
     vulnerability weights w_s ∈ {1000, 1, 0.5} per the paper (head/hands
     → 1000, shanks/shoulders → 1, torso/thighs/elbows → 0.5).
 
-    Adjacent‑link collisions are excluded by the sensor pattern (only
-    links versus terrain, not link‑versus‑link).
+    MuJoCo's parent filtering excludes adjacent-link collisions; Stage II also
+    includes non-adjacent self contacts.
     """
-    from mjlab.sensor import ContactSensor
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        self._alpha = float(cfg.params.get("alpha", 0.3))
+        self._sensor = env.scene[cfg.params.get("sensor_name", "body_ground_contact")]
+        asset: Entity = env.scene["robot"]
+        mj_model = env.sim.mj_model
 
-    sensor: ContactSensor = env.scene[sensor_name]
-    if sensor.data.force is None or sensor.data.found is None:
-        return torch.zeros(env.num_envs, device=env.device)
+        local_geom_ids, resolved_names = asset.find_geoms(
+            self._sensor.primary_names, preserve_order=True
+        )
+        if resolved_names != self._sensor.primary_names:
+            raise RuntimeError("Contact sensor and entity geom order do not match")
+        geom_ids = [
+            int(asset.indexing.geom_ids[local_id]) for local_id in local_geom_ids
+        ]
+        geom_body_ids = [int(mj_model.geom_bodyid[geom_id]) for geom_id in geom_ids]
 
-    # ContactData tensors: [B, P], [B, P, 3] (no history/slots when
-    # history_length=1, num_slots=1, reduce="none").
-    force = sensor.data.force  # [B, P, 3]
-    found = sensor.data.found  # [B, P]
-    contact_mask = (found > 0.0).float()  # [B, P]
+        component_names: list[str] = []
+        component_indices: dict[str, int] = {}
+        geom_group_ids: list[int] = []
+        for name in self._sensor.primary_names:
+            component_name = re.sub(r"_foot[1-7]_collision$", "_foot_collision", name)
+            if component_name not in component_indices:
+                component_indices[component_name] = len(component_names)
+                component_names.append(component_name)
+            geom_group_ids.append(component_indices[component_name])
+        self._geom_group_ids = torch.tensor(
+            geom_group_ids, device=env.device, dtype=torch.long
+        )
 
-    # Build per‑geom vulnerability weight tensor.
-    w_s = torch.tensor(
-        [_GEOM_VULNERABILITY.get(n, _VULNERABILITY_LOW)
-         for n in sensor.primary_names],
-        device=env.device,
-    )  # (N_geoms,)
+        component_body_ids = [-1] * len(component_names)
+        component_vulnerability = [_VULNERABILITY_LOW] * len(component_names)
+        for geom_idx, group_idx in enumerate(geom_group_ids):
+            body_id = geom_body_ids[geom_idx]
+            if component_body_ids[group_idx] not in (-1, body_id):
+                raise RuntimeError("A contact component spans multiple MuJoCo bodies")
+            component_body_ids[group_idx] = body_id
+            component_vulnerability[group_idx] = max(
+                component_vulnerability[group_idx],
+                _GEOM_VULNERABILITY.get(
+                    self._sensor.primary_names[geom_idx], _VULNERABILITY_LOW
+                ),
+            )
 
-    # Body mass vector (kg) — indexed via geom→body lookup on CPU.
-    asset: Entity = env.scene["robot"]
-    mjm = env.sim.mj_model
-    g_val = mjm.opt.gravity[2]  # −9.81, take abs for loading
-    body_mass = torch.tensor(
-        [mjm.body_mass[mjm.geom_bodyid[g]]
-         for g, _ in enumerate(sensor.primary_names)],
-        device=env.device,
-    )  # (N_geoms,)
+        body_counts: dict[int, int] = {}
+        for body_id in component_body_ids:
+            body_counts[body_id] = body_counts.get(body_id, 0) + 1
 
-    # Contact force magnitude.
-    f_contact = torch.norm(force, dim=-1)  # (B, N_geoms)
-    m_g = body_mass * abs(g_val)  # (N_geoms,) gravitational loading
+        # A body can expose multiple semantic collision regions (notably torso
+        # and head). Split its gravitational loading instead of subtracting the
+        # complete body weight once per geom.
+        masses = [
+            float(mj_model.body_mass[body_id]) / body_counts[body_id]
+            for body_id in component_body_ids
+        ]
+        self._gravity_load = torch.tensor(
+            masses, device=env.device, dtype=torch.float
+        ) * abs(float(mj_model.opt.gravity[2]))
+        self._vulnerability = torch.tensor(
+            [
+                value for value in component_vulnerability
+            ],
+            device=env.device,
+            dtype=torch.float,
+        )
 
-    # Clip to penalty: only force excess over gravitational loading.
-    excess = torch.clamp(f_contact - m_g.unsqueeze(0), min=0.0)  # (B, N_geoms)
+    def __call__(self, env: ManagerBasedRlEnv, **_: object) -> torch.Tensor:
+        data = self._sensor.data
+        if data.force is None:
+            return torch.zeros(self.num_envs, device=self.device)
 
-    weighted = contact_mask * w_s.unsqueeze(0) * excess ** 2  # (B, N_geoms)
+        if data.force_history is not None:
+            # [B, geom, substep, xyz] -> [B, substep, geom, xyz]
+            force_vectors = data.force_history.permute(0, 2, 1, 3)
+        else:
+            force_vectors = data.force.unsqueeze(1)
 
-    N_active = contact_mask.sum(dim=-1).clamp(min=1)  # (B,)
+        grouped = torch.zeros(
+            force_vectors.shape[0],
+            force_vectors.shape[1],
+            self._gravity_load.numel(),
+            3,
+            device=self.device,
+            dtype=force_vectors.dtype,
+        )
+        grouped.index_add_(2, self._geom_group_ids, force_vectors)
+        force = torch.linalg.vector_norm(grouped, dim=-1)
 
-    r_avg = weighted.sum(dim=-1) / N_active  # Eq.3 first term
-    r_peak = weighted.max(dim=-1)[0]  # Eq.3 second term (max over i)
-
-    return -(r_avg + alpha * r_peak)
+        contact_mask = force > 1.0e-6
+        excess = torch.clamp(force - self._gravity_load.view(1, 1, -1), min=0.0)
+        weighted = (
+            contact_mask
+            * self._vulnerability.view(1, 1, -1)
+            * excess.square()
+        )
+        active = contact_mask.sum(dim=-1).clamp(min=1)
+        cost = weighted.sum(dim=-1) / active + self._alpha * weighted.max(dim=-1).values
+        return _stable_cost(env, cost.max(dim=1).values, max_cost=5.0e10) * _impact_phase(env)
 
 
 # ---------------------------------------------------------------------------
@@ -165,21 +212,24 @@ def reward_contact_force(
 # ---------------------------------------------------------------------------
 
 
-def reward_joint_torques(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
+def _impact_loads(env: ManagerBasedRlEnv) -> ImpactLoadAccumulator:
+    try:
+        return env._safefall_impact_loads
+    except AttributeError as exc:
+        raise RuntimeError(
+            "SafeFall impact rewards require the ImpactLoadAccumulator metric"
+        ) from exc
+
+
+def reward_joint_torques(env: ManagerBasedRlEnv) -> torch.Tensor:
     """Normalized torque ratio penalty matching paper Eq.5.
 
     Penalizes joint torques that exceed the actuator's maximum rated torque.
     τ̄_i is the actuator effort_limit per joint.
     """
-    asset: Entity = env.scene[asset_cfg.name]
-    tau = asset.data.qfrc_actuator  # (N, 29) actuator force in joint space
-    tau_bar = _MAX_TORQUE.to(tau.device)  # (29,)
-    ratio = torch.abs(tau) / tau_bar.clamp(min=1.0)  # (N, 29)
-    penalty = torch.clamp(ratio - 1.0, min=0.0)
-    return torch.sum(penalty ** 2, dim=-1)
+    return _stable_cost(
+        env, _impact_loads(env).consume_torque_cost(), max_cost=1.0e3
+    ) * _impact_phase(env)
 
 
 # ---------------------------------------------------------------------------
@@ -187,37 +237,20 @@ def reward_joint_torques(
 #
 # f_{joint,j} is the joint-reaction force that maintains kinematic
 # constraints between adjacent links during impact propagation.
-# MuJoCo stores this in efc_force, but the Warp backend does not
-# expose efc_force to Python (shape is always (0,)).  We use
-# qfrc_external (J^T × body wrench in joint space) as a proxy —
-# it captures the joint-space contribution of external body-level
-# wrenches (xfrc_applied), which are the dominant loading component
-# during falls.
-#
-# f_thresh,j is set to 0.5 × τ̄_j, where τ̄_j is the actuator's
-# maximum rated torque (effort_limit).  This approximates the
-# joint's mechanical load capacity: for typical robot actuators,
-# the sustainable static structural load is ~50% of the peak
-# electromagnetic torque before bearing / gear degradation.
+# MuJoCo-Warp exposes cfrc_int, the spatial interaction wrench transmitted
+# between each body and its parent. The substep accumulator uses its force
+# component and a configurable mechanical threshold.
 # ---------------------------------------------------------------------------
 
-def reward_joint_reaction(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    threshold_fraction: float = 0.5,
-) -> torch.Tensor:
+def reward_joint_reaction(env: ManagerBasedRlEnv) -> torch.Tensor:
     """Joint reaction force penalty — proxy for paper Eq.4.
 
-    Proxy: replaces f_{joint} with qfrc_external (body wrench in
-    joint space).  Penalises when this exceeds half the actuator's
-    maximum rated torque (mechanical load capacity estimate).
+    Uses MuJoCo ``cfrc_int`` interaction forces accumulated at 200 Hz by
+    :class:`ImpactLoadAccumulator`.
     """
-    asset: Entity = env.scene[asset_cfg.name]
-    f_ext = torch.abs(asset.data.qfrc_external)  # (N, 29)
-    tau_bar = _MAX_TORQUE.to(f_ext.device)
-    f_thresh = tau_bar * threshold_fraction  # mechanical load capacity
-    penalty = torch.clamp(f_ext - f_thresh, min=0.0)
-    return torch.sum(penalty ** 2, dim=-1)
+    return _stable_cost(
+        env, _impact_loads(env).consume_joint_force_cost(), max_cost=2.5e8
+    ) * _impact_phase(env)
 
 
 # ---------------------------------------------------------------------------
@@ -229,9 +262,14 @@ def reward_action_rate(
     env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
     """Penalize rapid action changes for smooth protective motions."""
-    return torch.sum(
+    cost = torch.sum(
         torch.square(env.action_manager.action - env.action_manager.prev_action), dim=-1
     )
+    # During impact, rapid target changes can be protective.  Once the hold
+    # phase begins, the same motion should be strongly damped.
+    phase = _hold_phase(env)
+    phase_weight = 0.1 + 0.9 * phase
+    return _stable_cost(env, cost, max_cost=2.0e4) * phase_weight
 
 
 def reward_joint_vel(
@@ -240,7 +278,8 @@ def reward_joint_vel(
 ) -> torch.Tensor:
     """Penalize excessive joint velocities."""
     asset: Entity = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.joint_vel), dim=-1)
+    cost = torch.sum(torch.square(asset.data.joint_vel), dim=-1)
+    return _stable_cost(env, cost, max_cost=1.2e6) * _hold_phase(env)
 
 
 def reward_joint_acc(
@@ -249,7 +288,8 @@ def reward_joint_acc(
 ) -> torch.Tensor:
     """Penalize joint accelerations."""
     asset: Entity = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.joint_acc), dim=-1)
+    cost = torch.sum(torch.square(asset.data.joint_acc), dim=-1)
+    return _stable_cost(env, cost, max_cost=2.0e7) * _hold_phase(env)
 
 
 def reward_joint_pos_limits(
@@ -263,6 +303,64 @@ def reward_joint_pos_limits(
     upper = asset.data.soft_joint_pos_limits[..., 1]
     below = torch.clamp(lower - pos, min=0.0)
     above = torch.clamp(pos - upper, min=0.0)
-    return torch.sum(below + above, dim=-1)
+    cost = torch.sum(below + above, dim=-1)
+    return _stable_cost(env, cost, max_cost=100.0)
 
 
+def reward_simulation_failure(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """One-shot penalty for leaving the simulator's physical validity range."""
+    return simulation_state_invalid(env).float()
+
+
+def _settling_motion(env: ManagerBasedRlEnv):
+    try:
+        return env._safefall_settling_motion
+    except AttributeError as exc:
+        raise RuntimeError(
+            "SafeFall settling rewards require the SettlingMotionAccumulator metric"
+        ) from exc
+
+
+def _hold_phase(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Training-only phase mask; it is never passed to the actor."""
+    return _settling_motion(env).phase.float()
+
+
+def _impact_phase(env: ManagerBasedRlEnv) -> torch.Tensor:
+    return 1.0 - _hold_phase(env)
+
+
+def reward_post_fall_stability(
+    env: ManagerBasedRlEnv,
+    **_: object,
+) -> torch.Tensor:
+    """Reward low motion after terrain contact and a sustained quiet interval."""
+    return _settling_motion(env).score
+
+
+def penalty_post_fall_motion(
+    env: ManagerBasedRlEnv,
+    **_: object,
+) -> torch.Tensor:
+    """Penalize residual root/joint motion after terrain contact."""
+    return _settling_motion(env).motion_cost
+
+
+def penalty_post_fall_pose_drift(
+    env: ManagerBasedRlEnv,
+    **_: object,
+) -> torch.Tensor:
+    """Penalize drifting away from the naturally derived post-impact pose.
+
+    The reference is captured after a short impact-absorption delay, so this
+    term does not impose a fixed upright/folded target on the fall.
+    """
+    return _settling_motion(env).pose_drift
+
+
+def penalty_post_fall_action_drift(
+    env: ManagerBasedRlEnv,
+    **_: object,
+) -> torch.Tensor:
+    """Penalize changing the joint target after the natural pose is locked."""
+    return _settling_motion(env).action_drift

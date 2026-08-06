@@ -9,12 +9,12 @@ Migrated from IsaacLab to mjlab.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_from_euler_xyz
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -26,9 +26,10 @@ def reset_falling_state(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    height_range: tuple = (0.4, 0.9),
-    vel_range: tuple = (0.0, 2.0),
-    ang_vel_range: tuple = (-1.0, 1.0),
+    height_range: tuple[float, float] = (1.0, 1.2),
+    horizontal_speed_range: tuple[float, float] = (0.0, 2.0),
+    downward_speed_range: tuple[float, float] = (-3.0, -1.5),
+    ang_vel_range: tuple[float, float] = (-3.0, 3.0),
 ):
     """Reset robot to random falling configurations.
 
@@ -40,7 +41,8 @@ def reset_falling_state(
         env_ids: Environment indices to reset.
         asset_cfg: Scene entity configuration for the robot.
         height_range: (min, max) range for base height above ground (m).
-        vel_range: (min, max) range for linear velocity components (m/s).
+        horizontal_speed_range: Horizontal speed magnitude range (m/s).
+        downward_speed_range: Downward root velocity range (m/s).
         ang_vel_range: (min, max) range for angular velocity components (rad/s).
     """
     asset: Entity = env.scene[asset_cfg.name]
@@ -54,17 +56,22 @@ def reset_falling_state(
     heights = torch.empty(num_envs, device=device).uniform_(*height_range)
     root_state[:, 2] = heights
 
-    # Random tilt (roll, pitch) and yaw → quaternion (wxyz).
-    roll = torch.empty(num_envs, device=device).uniform_(-0.8, 0.8)
-    pitch = torch.empty(num_envs, device=device).uniform_(-0.8, 0.8)
-    yaw = torch.empty(num_envs, device=device).uniform_(-3.14, 3.14)
-    quat = quat_from_euler_xyz(roll, pitch, yaw)  # (N, 4) wxyz
-    root_state[:, 3:7] = quat
+    # Uniform random orientations cover forward, backward, and lateral falls.
+    quat = torch.randn(num_envs, 4, device=device)
+    root_state[:, 3:7] = quat / torch.linalg.vector_norm(
+        quat, dim=-1, keepdim=True
+    ).clamp(min=1.0e-6)
 
-    # Random downward velocity.
-    root_state[:, 7] = torch.empty(num_envs, device=device).uniform_(-vel_range[1], vel_range[1])
-    root_state[:, 8] = torch.empty(num_envs, device=device).uniform_(-vel_range[1], vel_range[1])
-    root_state[:, 9] = torch.empty(num_envs, device=device).uniform_(-vel_range[1], -0.5)
+    # Random horizontal direction and explicitly downward velocity. Starting
+    # above the robot's collision radius avoids reset penetration, while this
+    # speed ensures impact occurs well inside the fixed 0.8 s episode.
+    heading = torch.empty(num_envs, device=device).uniform_(-torch.pi, torch.pi)
+    speed = torch.empty(num_envs, device=device).uniform_(*horizontal_speed_range)
+    root_state[:, 7] = speed * torch.cos(heading)
+    root_state[:, 8] = speed * torch.sin(heading)
+    root_state[:, 9] = torch.empty(num_envs, device=device).uniform_(
+        *downward_speed_range
+    )
 
     # Random angular velocity.
     root_state[:, 10] = torch.empty(num_envs, device=device).uniform_(*ang_vel_range)
@@ -79,6 +86,11 @@ def reset_falling_state(
     # Randomize joint positions slightly.
     joint_pos = asset.data.default_joint_pos[env_ids].clone()
     joint_pos += torch.empty_like(joint_pos).uniform_(-0.2, 0.2)
+    limits = asset.data.joint_pos_limits[env_ids]
+    joint_pos = torch.minimum(
+        torch.maximum(joint_pos, limits[..., 0] + 0.02),
+        limits[..., 1] - 0.02,
+    )
     joint_vel = torch.empty_like(joint_pos).uniform_(-0.5, 0.5)
     asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
@@ -88,13 +100,21 @@ def reset_falling_state(
 # ---------------------------------------------------------------------------
 
 _STAGE2_BANK: dict[str, torch.Tensor] | None = None
+_STAGE2_BANK_PATH: Path | None = None
 
 
 def _load_stage2_bank(bank_path: str) -> dict[str, torch.Tensor]:
     """Lazy‑load the Stage II state bank (shared across all envs)."""
-    global _STAGE2_BANK
-    if _STAGE2_BANK is None:
-        _STAGE2_BANK = torch.load(bank_path, map_location="cpu", weights_only=False)
+    global _STAGE2_BANK, _STAGE2_BANK_PATH
+    resolved = Path(bank_path).resolve()
+    if _STAGE2_BANK is None or _STAGE2_BANK_PATH != resolved:
+        _STAGE2_BANK = torch.load(resolved, map_location="cpu", weights_only=False)
+        _STAGE2_BANK_PATH = resolved
+    if _STAGE2_BANK.get("state_schema_version", 0) < 2:
+        raise ValueError(
+            f"Stage II bank {resolved} does not contain exact root states. "
+            "Rebuild it with prepare_stage2_states.py."
+        )
     return _STAGE2_BANK
 
 
@@ -108,10 +128,8 @@ def reset_falling_from_bank(
 ):
     """Reset robot to predictor-flagged falling states (paper Stage II).
 
-    Samples initial states from a pre‑extracted bank of realistic
-    falling configurations, then applies small random noise for
-    diversity.  Falls back to ``reset_falling_state`` if the bank
-    cannot be loaded.
+    Samples exact initial states from a pre-extracted bank of realistic
+    falling configurations, then applies small joint noise for diversity.
 
     Args:
         env: The manager-based RL environment.
@@ -134,66 +152,19 @@ def reset_falling_from_bank(
     joint_pos = bank["joint_pos"][idx].to(device).clone()    # (N, 29)
     joint_vel = bank["joint_vel"][idx].to(device).clone()    # (N, 29)
 
-    # Bank stores Z=0 and lin_vel=0 — fill with random values
-    # matching the paper's falling-state ranges.
-    root_state[:, 2] = torch.empty(num_envs, device=device).uniform_(0.4, 0.9)
-    root_state[:, 7] = torch.empty(num_envs, device=device).uniform_(-2.0, 2.0)
-    root_state[:, 8] = torch.empty(num_envs, device=device).uniform_(-2.0, 2.0)
-    root_state[:, 9] = torch.empty(num_envs, device=device).uniform_(-2.0, -0.5)
+    # XY translation is dynamically irrelevant on a plane. Preserve the exact
+    # height, orientation, and velocities captured when the predictor fired.
+    root_state[:, 0:2] = 0.0
 
     # Small Gaussian noise on joints for diversity.
     joint_pos += torch.randn_like(joint_pos) * pos_noise
     joint_vel += torch.randn_like(joint_vel) * vel_noise
+    limits = asset.data.joint_pos_limits[env_ids]
+    joint_pos = torch.minimum(
+        torch.maximum(joint_pos, limits[..., 0] + 0.02),
+        limits[..., 1] - 0.02,
+    )
 
-    # Write tentative state so we can check validity.
     root_state[:, 0:3] += env.scene.env_origins[env_ids]
     asset.write_root_state_to_sim(root_state, env_ids)
     asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
-    env.sim.forward()
-
-    # ── Kinematic validity filter (paper §III-D) ──
-    # Use MuJoCo's native contact distances after forward kinematics.
-    # ``dist < 0`` means geometry‑aware penetration (handles any
-    # body shape — sphere radius, box half‑extent, etc.).
-    #   - ground penetration:  either geom's parent body is world (id 0)
-    #   - self‑collision:      both geoms belong to the robot
-    import mujoco
-    _mjm = env.sim.mj_model
-    _mjd = env.sim.mj_data
-    sim_data = env.sim.data
-    invalid = torch.zeros(num_envs, dtype=torch.bool, device=device)
-    for j, ei in enumerate(env_ids.cpu().tolist()):
-        _mjd.qpos[:] = sim_data.qpos[ei].cpu().numpy()
-        _mjd.qvel[:] = sim_data.qvel[ei].cpu().numpy()
-        mujoco.mj_forward(_mjm, _mjd)
-        for c in range(_mjd.ncon):
-            if _mjd.contact.dist[c] >= 0:  # geometry‑aware — positive = no penetration
-                continue
-            b1 = _mjm.geom_bodyid[_mjd.contact.geom1[c]]
-            b2 = _mjm.geom_bodyid[_mjd.contact.geom2[c]]
-            # ground penetration (world body is id 0)
-            if b1 == 0 or b2 == 0:
-                invalid[j] = True
-                break
-            # self‑collision (both robot bodies)
-            if b1 != 0 and b2 != 0:
-                invalid[j] = True
-                break
-
-    if invalid.any().item():
-        n_invalid = invalid.sum().item()
-        new_idx = torch.randint(0, K, (n_invalid,))
-        joint_pos[invalid] = bank["joint_pos"][new_idx].to(device).clone()
-        joint_vel[invalid] = bank["joint_vel"][new_idx].to(device).clone()
-        joint_pos[invalid] += torch.randn_like(joint_pos[invalid]) * pos_noise
-        joint_vel[invalid] += torch.randn_like(joint_vel[invalid]) * vel_noise
-        # Restore random height and velocity for resampled envs.
-        root_state[invalid, 2] = torch.empty(n_invalid, device=device).uniform_(0.4, 0.9)
-        root_state[invalid, 7] = torch.empty(n_invalid, device=device).uniform_(-2.0, 2.0)
-        root_state[invalid, 8] = torch.empty(n_invalid, device=device).uniform_(-2.0, 2.0)
-        root_state[invalid, 9] = torch.empty(n_invalid, device=device).uniform_(-2.0, -0.5)
-        # Restore XY offset.
-        root_state[invalid, 0:2] += env.scene.env_origins[env_ids[invalid], 0:2]
-        asset.write_root_state_to_sim(root_state, env_ids)
-        asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
-        env.sim.forward()

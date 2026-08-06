@@ -82,6 +82,9 @@ class TrajectoryWriter:
 
     def __init__(self, env: object | None = None, env_idx: int = 0) -> None:
         self._frames: list[torch.Tensor] = []
+        self._root_states: list[torch.Tensor] = []
+        self._joint_positions: list[torch.Tensor] = []
+        self._joint_velocities: list[torch.Tensor] = []
         self._env = env
         self._env_idx = env_idx
 
@@ -96,13 +99,50 @@ class TrajectoryWriter:
             x = x[self._env_idx].clone()
         self._frames.append(x)
 
-    def add_from_batch(self, batch: torch.Tensor) -> None:
+        asset = self._env.scene["robot"]
+        root_state = torch.cat(
+            [
+                asset.data.root_link_pos_w,
+                asset.data.root_link_quat_w,
+                asset.data.root_link_vel_w,
+            ],
+            dim=-1,
+        ).detach().cpu()
+        root_state[:, 0:3] -= self._env.scene.env_origins.detach().cpu()
+        self._root_states.append(root_state[self._env_idx].clone())
+        self._joint_positions.append(
+            asset.data.joint_pos[self._env_idx].detach().cpu().clone()
+        )
+        self._joint_velocities.append(
+            asset.data.joint_vel[self._env_idx].detach().cpu().clone()
+        )
+
+    def add_from_batch(
+        self,
+        batch: torch.Tensor,
+        root_state_batch: torch.Tensor | None = None,
+        joint_pos_batch: torch.Tensor | None = None,
+        joint_vel_batch: torch.Tensor | None = None,
+    ) -> None:
         """Add a frame from a pre-extracted (B, 63) CPU tensor.
 
         *batch* must already be on CPU and detached.  This avoids N
         redundant GPU→CPU transfers when collecting with many envs.
         """
         self._frames.append(batch[self._env_idx].clone())
+        state_batches = (root_state_batch, joint_pos_batch, joint_vel_batch)
+        if all(value is None for value in state_batches):
+            return
+        if any(value is None for value in state_batches):
+            raise ValueError(
+                "Full trajectory state requires root, joint-pos, and joint-vel batches"
+            )
+        assert root_state_batch is not None
+        assert joint_pos_batch is not None
+        assert joint_vel_batch is not None
+        self._root_states.append(root_state_batch[self._env_idx].clone())
+        self._joint_positions.append(joint_pos_batch[self._env_idx].clone())
+        self._joint_velocities.append(joint_vel_batch[self._env_idx].clone())
 
     def __len__(self) -> int:
         return len(self._frames)
@@ -124,6 +164,15 @@ class TrajectoryWriter:
             "labels": compute_labels(len(self)),  # tensor (T,)
             "T": len(self),  # int （后续的使用不涉及矩阵运算；int 占用少量内存）
         }
+        if len(self._root_states) == len(self._frames):
+            data.update(
+                {
+                    "root_state": torch.stack(self._root_states),
+                    "joint_pos": torch.stack(self._joint_positions),
+                    "joint_vel": torch.stack(self._joint_velocities),
+                    "state_schema_version": 2,
+                }
+            )
         torch.save(data, path)
 
 

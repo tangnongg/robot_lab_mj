@@ -481,11 +481,11 @@ def _build_rewards() -> dict[str, RewardTermCfg]:
             weight=-3.0,
             params={"free_force": 20.0, "force_scale": 100.0, "hold_only": False},
         ),
-        # Avoid a statically frozen but high-energy curled posture without
-        # prescribing a particular final configuration.
+        # A terminal pose may be any naturally derived lying configuration,
+        # but no lower-leg link may remain held high after impact.
         "post_fall_limb_height": RewardTermCfg(
             func=mdp.PostFallExcessLimbHeightPenalty,
-            weight=-2.0,
+            weight=-3.0,
             params={"height_margin": 0.30},
         ),
     }

@@ -73,6 +73,24 @@ def _record_step(env: ManagerBasedRlEnv) -> dict[str, np.ndarray]:
     limb_masses = torch.as_tensor(env.sim.mj_model.body_mass[limb_global_ids], device=env.device)
     limb_height = asset.data.body_com_pos_w[0, limb_ids, 2] - env.scene.env_origins[0, 2]
     limb_com_height = torch.sum(limb_masses * limb_height) / limb_masses.sum().clamp(min=1.0e-6)
+    lower_leg_ids = [
+        index
+        for index, name in enumerate(asset.body_names)
+        if name.startswith(
+            (
+                "left_hip_",
+                "left_knee_",
+                "left_ankle_",
+                "right_hip_",
+                "right_knee_",
+                "right_ankle_",
+            )
+        )
+    ]
+    lower_leg_height = (
+        asset.data.body_com_pos_w[0, lower_leg_ids, 2] - env.scene.env_origins[0, 2]
+    )
+    lower_leg_height_max = torch.amax(lower_leg_height)
     torso_id = asset.body_names.index("torso_link")
     knee_ids = [asset.body_names.index(name) for name in ("left_knee_link", "right_knee_link")]
     ankle_ids = [
@@ -103,6 +121,7 @@ def _record_step(env: ManagerBasedRlEnv) -> dict[str, np.ndarray]:
         "head_clearance": _to_numpy(head_clearance.unsqueeze(0)),
         "head_contact_force": _to_numpy(head_force.unsqueeze(0)),
         "limb_com_height": _to_numpy(limb_com_height.unsqueeze(0)),
+        "lower_leg_com_height_max": _to_numpy(lower_leg_height_max.unsqueeze(0)),
         "leg_fold_distance": _to_numpy(leg_fold_distance),
         "knee_joint_pos": _to_numpy(asset.data.joint_pos[0, knee_joint_ids]),
     }
@@ -135,6 +154,7 @@ def _metric_arrays(data: dict[str, np.ndarray], dt: float) -> dict[str, np.ndarr
         "head_clearance": data["head_clearance"].squeeze(-1),
         "head_contact_force": data["head_contact_force"].squeeze(-1),
         "limb_com_height": data["limb_com_height"].squeeze(-1),
+        "lower_leg_com_height_max": data["lower_leg_com_height_max"].squeeze(-1),
         "leg_fold_distance": data["leg_fold_distance"],
         "knee_joint_pos": data["knee_joint_pos"],
     }
@@ -196,6 +216,9 @@ def _settling_report(metrics: dict[str, np.ndarray], dt: float) -> dict[str, obj
             "head_clearance_m": float(np.mean(metrics["head_clearance"][tail])),
             "head_contact_force_n": float(np.mean(metrics["head_contact_force"][tail])),
             "limb_com_height_m": float(np.mean(metrics["limb_com_height"][tail])),
+            "maximum_lower_leg_com_height_m": float(
+                np.mean(metrics["lower_leg_com_height_max"][tail])
+            ),
             "minimum_knee_torso_distance_m": float(np.min(metrics["leg_fold_distance"][tail, :2])),
             "minimum_ankle_torso_distance_m": float(np.min(metrics["leg_fold_distance"][tail, 2:])),
             "peak_knee_angle_rad": float(np.max(metrics["knee_joint_pos"][tail])),
@@ -203,6 +226,9 @@ def _settling_report(metrics: dict[str, np.ndarray], dt: float) -> dict[str, obj
         "posture_safety": {
             "minimum_head_clearance_m": float(np.min(metrics["head_clearance"])),
             "peak_head_contact_force_n": float(np.max(metrics["head_contact_force"])),
+            "maximum_lower_leg_com_height_m": float(
+                np.max(metrics["lower_leg_com_height_max"])
+            ),
             "impact_minimum_knee_torso_distance_m": float(
                 np.min(metrics["leg_fold_distance"][impact, :2])
             ),
@@ -253,7 +279,7 @@ def _plot_all(metrics: dict[str, np.ndarray], names: dict[str, list[str]], dt: f
         (contact, "maximum terrain contact force (N)"),
         (metrics["root_height"], "root height (m)"),
         (metrics["head_clearance"], "head terrain clearance (m)"),
-        (metrics["limb_com_height"], "mass-weighted limb COM height (m)"),
+        (metrics["lower_leg_com_height_max"], "maximum lower-leg COM height (m)"),
     ]
     for ax, (value, title) in zip(axes.flat, curves, strict=True):
         ax.plot(times, value, linewidth=1.2)

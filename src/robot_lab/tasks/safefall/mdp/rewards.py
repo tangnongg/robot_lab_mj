@@ -433,31 +433,32 @@ class PostFallHeadContactPenalty(ManagerTermBase):
 
 
 class PostFallExcessLimbHeightPenalty(ManagerTermBase):
-    """Discourage a high-energy, suspended-limb terminal pose.
+    """Discourage a raised-leg terminal pose without prescribing a pose.
 
-    This is a mass-weighted hinge on the COM height of all left/right limb
-    links.  It leaves the final configuration unconstrained below the height
-    margin, so it does not encode a hand-designed lying pose; it merely makes
-    a curled leg held high against gravity less attractive.
+    A mass average across all limbs hides the failure mode where one lower leg
+    is held vertically while the rest of the body is quiet.  Instead, apply a
+    hinge to the highest COM among both lower-leg chains.  The cost is zero
+    below the margin, so prone, supine, and side-lying poses remain available;
+    only a suspended leg is made unattractive after the impact window.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
         super().__init__(env)
         asset: Entity = env.scene[cfg.params.get("asset_name", "robot")]
+        leg_prefixes = (
+            "left_hip_",
+            "left_knee_",
+            "left_ankle_",
+            "right_hip_",
+            "right_knee_",
+            "right_ankle_",
+        )
         local_ids = [
-            index for index, name in enumerate(asset.body_names)
-            if name.startswith(("left_", "right_"))
+            index for index, name in enumerate(asset.body_names) if name.startswith(leg_prefixes)
         ]
         if not local_ids:
-            raise RuntimeError("SafeFall limb-height reward could not resolve limb bodies")
-        body_ids = asset.indexing.body_ids[local_ids]
-        masses = torch.as_tensor(
-            env.sim.mj_model.body_mass[body_ids.cpu().numpy()],
-            device=env.device,
-            dtype=torch.float,
-        )
+            raise RuntimeError("SafeFall raised-leg reward could not resolve lower-leg bodies")
         self._body_ids = torch.as_tensor(local_ids, device=env.device, dtype=torch.long)
-        self._mass_weights = masses / masses.sum().clamp(min=1.0e-6)
         self._height_margin = float(cfg.params.get("height_margin", 0.30))
 
     def __call__(self, env: ManagerBasedRlEnv, **_: object) -> torch.Tensor:
@@ -466,7 +467,7 @@ class PostFallExcessLimbHeightPenalty(ManagerTermBase):
             - env.scene.env_origins[:, None, 2]
         )
         excess = torch.relu(heights - self._height_margin) / self._height_margin
-        cost = torch.sum(self._mass_weights * torch.square(excess), dim=-1)
+        cost = torch.amax(torch.square(excess), dim=-1)
         return _stable_cost(env, cost, max_cost=100.0) * _hold_phase(env)
 
 

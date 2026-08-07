@@ -1,0 +1,39 @@
+{
+  "contact_step": 7,
+  "contact_time_s": 0.14,
+  "settled_step_5_policy_steps": 43,
+  "settled_time_s": 0.86,
+  "limits": {
+    "root_lin_speed": 0.2645285129547119,
+    "root_ang_speed": 0.8344280242919923,
+    "joint_vel_rms": 0.511899757385254
+  },
+  "precontact_peaks": {
+    "root_lin_speed": 2.645285129547119,
+    "root_ang_speed": 8.344280242919922,
+    "joint_vel_rms": 5.118997573852539
+  },
+  "tail20_mean": {
+    "root_lin_speed": 0.0006075991550460458,
+    "root_ang_speed": 0.004993038717657328,
+    "joint_vel_rms": 0.0037574972957372665,
+    "body_lin_speed_max": 0.0063477493822574615,
+    "body_ang_speed_max": 0.015070182271301746,
+    "joint_acc_rms": 0.22236497700214386,
+    "head_clearance_m": 0.45056113600730896,
+    "head_contact_force_n": 0.0,
+    "limb_com_height_m": 0.16507741808891296,
+    "minimum_knee_torso_distance_m": 0.6766378283500671,
+    "minimum_ankle_torso_distance_m": 0.7986907958984375,
+    "peak_knee_angle_rad": 0.8043574094772339
+  },
+  "posture_safety": {
+    "minimum_head_clearance_m": 0.1256229281425476,
+    "peak_head_contact_force_n": 0.0,
+    "impact_minimum_knee_torso_distance_m": 0.7009212970733643,
+    "impact_minimum_ankle_torso_distance_m": 0.7803691029548645,
+    "minimum_knee_torso_distance_m": 0.6627417206764221,
+    "minimum_ankle_torso_distance_m": 0.7463645935058594,
+    "peak_knee_angle_rad": 1.2414019107818604
+  }
+}

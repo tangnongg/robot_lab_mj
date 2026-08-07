@@ -364,3 +364,203 @@ def penalty_post_fall_action_drift(
 ) -> torch.Tensor:
     """Penalize changing the joint target after the natural pose is locked."""
     return _settling_motion(env).action_drift
+
+
+# ---------------------------------------------------------------------------
+# Post-impact posture safety
+# ---------------------------------------------------------------------------
+
+
+class PostFallHeadClearancePenalty(ManagerTermBase):
+    """Keep the head collision sphere clear of the terrain during hold.
+
+    The regular paper contact term is deliberately active only while absorbing
+    the impact.  Without a hold-phase term, a policy can therefore obtain a
+    quiet but unsafe terminal state by resting its head on the ground.  This
+    term uses the actual MuJoCo collision sphere rather than pelvis height, so
+    it remains meaningful for side, back, and prone falls alike.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        asset: Entity = env.scene[cfg.params.get("asset_name", "robot")]
+        local_ids, names = asset.find_geoms(("head_collision",), preserve_order=True)
+        if names != ["head_collision"]:
+            raise RuntimeError("SafeFall head-clearance reward requires head_collision")
+        self._head_geom_id = int(asset.indexing.geom_ids[local_ids[0]])
+        self._head_radius = float(env.sim.mj_model.geom_size[self._head_geom_id, 0])
+        self._min_clearance = float(cfg.params.get("min_clearance", 0.04))
+
+    def __call__(self, env: ManagerBasedRlEnv, **_: object) -> torch.Tensor:
+        # The plane terrain is at each environment origin.  ``geom_xpos`` is
+        # the sphere centre, hence subtract its radius to obtain true clearance.
+        terrain_z = env.scene.env_origins[:, 2]
+        surface_z = env.sim.data.geom_xpos[:, self._head_geom_id, 2] - self._head_radius
+        clearance = surface_z - terrain_z
+        cost = torch.square(torch.relu(self._min_clearance - clearance) / self._min_clearance)
+        return _stable_cost(env, cost, max_cost=100.0) * _hold_phase(env)
+
+
+class PostFallHeadContactPenalty(ManagerTermBase):
+    """Penalize terrain load borne by the head.
+
+    ``hold_only=False`` creates a weaker peak-impact term, while the default
+    creates the much stronger sustained-load term used after pose lock.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        sensor = env.scene[cfg.params.get("sensor_name", "ground_contact")]
+        try:
+            self._head_index = sensor.primary_names.index("head_collision")
+        except ValueError as exc:
+            raise RuntimeError("SafeFall ground-contact sensor must include head_collision") from exc
+        self._free_force = float(cfg.params.get("free_force", 5.0))
+        self._force_scale = float(cfg.params.get("force_scale", 50.0))
+        self._hold_only = bool(cfg.params.get("hold_only", True))
+
+    def __call__(self, env: ManagerBasedRlEnv, **_: object) -> torch.Tensor:
+        data = env.scene["ground_contact"].data
+        if data.force is None:
+            return torch.zeros(env.num_envs, device=env.device)
+        # Use every 200 Hz sample represented by this policy step.  A short
+        # re-contact should not be hidden by the final net force sample.
+        force = data.force_history if data.force_history is not None else data.force.unsqueeze(2)
+        head_force = torch.linalg.vector_norm(force[:, self._head_index], dim=-1).amax(dim=-1)
+        cost = torch.square(torch.relu(head_force - self._free_force) / self._force_scale)
+        phase_mask = _hold_phase(env) if self._hold_only else 1.0
+        return _stable_cost(env, cost, max_cost=100.0) * phase_mask
+
+
+class PostFallExcessLimbHeightPenalty(ManagerTermBase):
+    """Discourage a high-energy, suspended-limb terminal pose.
+
+    This is a mass-weighted hinge on the COM height of all left/right limb
+    links.  It leaves the final configuration unconstrained below the height
+    margin, so it does not encode a hand-designed lying pose; it merely makes
+    a curled leg held high against gravity less attractive.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        asset: Entity = env.scene[cfg.params.get("asset_name", "robot")]
+        local_ids = [
+            index for index, name in enumerate(asset.body_names)
+            if name.startswith(("left_", "right_"))
+        ]
+        if not local_ids:
+            raise RuntimeError("SafeFall limb-height reward could not resolve limb bodies")
+        body_ids = asset.indexing.body_ids[local_ids]
+        masses = torch.as_tensor(
+            env.sim.mj_model.body_mass[body_ids.cpu().numpy()],
+            device=env.device,
+            dtype=torch.float,
+        )
+        self._body_ids = torch.as_tensor(local_ids, device=env.device, dtype=torch.long)
+        self._mass_weights = masses / masses.sum().clamp(min=1.0e-6)
+        self._height_margin = float(cfg.params.get("height_margin", 0.30))
+
+    def __call__(self, env: ManagerBasedRlEnv, **_: object) -> torch.Tensor:
+        heights = (
+            env.scene["robot"].data.body_com_pos_w[:, self._body_ids, 2]
+            - env.scene.env_origins[:, None, 2]
+        )
+        excess = torch.relu(heights - self._height_margin) / self._height_margin
+        cost = torch.sum(self._mass_weights * torch.square(excess), dim=-1)
+        return _stable_cost(env, cost, max_cost=100.0) * _hold_phase(env)
+
+
+class ExcessLegFlexionPenalty(ManagerTermBase):
+    """Discourage the leg-folding posture that raises the CoM during a fall.
+
+    This is intentionally a *soft excess* penalty rather than a reference-pose
+    tracker.  Normal knee bending still provides impact compliance; only knee
+    flexion beyond ``knee_limit`` and extreme hip pitch are penalized.  It is
+    active in both impact and hold so the impact policy cannot create a highly
+    curled configuration that the hold policy would later inherit.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        asset: Entity = env.scene[cfg.params.get("asset_name", "robot")]
+        knee_ids, knee_names = asset.find_joints(
+            ("left_knee_joint", "right_knee_joint"), preserve_order=True
+        )
+        hip_ids, hip_names = asset.find_joints(
+            ("left_hip_pitch_joint", "right_hip_pitch_joint"), preserve_order=True
+        )
+        if knee_names != ["left_knee_joint", "right_knee_joint"]:
+            raise RuntimeError("SafeFall leg-flexion reward requires both knee joints")
+        if hip_names != ["left_hip_pitch_joint", "right_hip_pitch_joint"]:
+            raise RuntimeError("SafeFall leg-flexion reward requires both hip-pitch joints")
+        self._knee_ids = torch.as_tensor(knee_ids, device=env.device, dtype=torch.long)
+        self._hip_ids = torch.as_tensor(hip_ids, device=env.device, dtype=torch.long)
+        self._knee_limit = float(cfg.params.get("knee_limit", 1.45))
+        self._hip_limit = float(cfg.params.get("hip_limit", 1.25))
+        self._hip_weight = float(cfg.params.get("hip_weight", 0.5))
+
+    def __call__(self, env: ManagerBasedRlEnv, **_: object) -> torch.Tensor:
+        joint_pos = env.scene["robot"].data.joint_pos
+        knee_excess = torch.relu(joint_pos[:, self._knee_ids] - self._knee_limit)
+        hip_excess = torch.relu(torch.abs(joint_pos[:, self._hip_ids]) - self._hip_limit)
+        cost = (
+            torch.mean(torch.square(knee_excess / self._knee_limit), dim=-1)
+            + self._hip_weight
+            * torch.mean(torch.square(hip_excess / self._hip_limit), dim=-1)
+        )
+        return _stable_cost(env, cost, max_cost=100.0)
+
+
+class ImpactLegFoldPenalty(ManagerTermBase):
+    """Keep the knees and ankles from folding into the upper body on impact.
+
+    Joint angles alone are not sufficient once the robot is rotating: a leg can
+    reach the torso through a coordinated hip/knee motion without violating one
+    scalar angle limit.  This term uses body geometry and is active only during
+    the impact window.  The final hold pose remains unconstrained except by the
+    regular leg-flexion and settling terms.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        super().__init__(env)
+        asset: Entity = env.scene[cfg.params.get("asset_name", "robot")]
+        required = (
+            "torso_link",
+            "left_knee_link",
+            "right_knee_link",
+            "left_ankle_pitch_link",
+            "right_ankle_pitch_link",
+        )
+        missing = [name for name in required if name not in asset.body_names]
+        if missing:
+            raise RuntimeError(f"SafeFall impact leg-fold reward missing bodies: {missing}")
+        self._torso_id = asset.body_names.index("torso_link")
+        self._knee_ids = torch.as_tensor(
+            [asset.body_names.index("left_knee_link"), asset.body_names.index("right_knee_link")],
+            device=env.device,
+            dtype=torch.long,
+        )
+        self._ankle_ids = torch.as_tensor(
+            [
+                asset.body_names.index("left_ankle_pitch_link"),
+                asset.body_names.index("right_ankle_pitch_link"),
+            ],
+            device=env.device,
+            dtype=torch.long,
+        )
+        self._knee_min_distance = float(cfg.params.get("knee_min_distance", 0.24))
+        self._ankle_min_distance = float(cfg.params.get("ankle_min_distance", 0.20))
+        self._distance_scale = float(cfg.params.get("distance_scale", 0.10))
+        self._ankle_weight = float(cfg.params.get("ankle_weight", 0.5))
+
+    def __call__(self, env: ManagerBasedRlEnv, **_: object) -> torch.Tensor:
+        body_pos = env.scene["robot"].data.body_com_pos_w
+        torso = body_pos[:, self._torso_id : self._torso_id + 1]
+        knee_dist = torch.linalg.vector_norm(body_pos[:, self._knee_ids] - torso, dim=-1)
+        ankle_dist = torch.linalg.vector_norm(body_pos[:, self._ankle_ids] - torso, dim=-1)
+        knee_excess = torch.relu(self._knee_min_distance - knee_dist) / self._distance_scale
+        ankle_excess = torch.relu(self._ankle_min_distance - ankle_dist) / self._distance_scale
+        cost = torch.mean(torch.square(knee_excess), dim=-1) + self._ankle_weight * torch.mean(
+            torch.square(ankle_excess), dim=-1
+        )
+        return _stable_cost(env, cost, max_cost=100.0) * _impact_phase(env)

@@ -409,6 +409,28 @@ def _build_rewards() -> dict[str, RewardTermCfg]:
             func=mdp.reward_joint_pos_limits,
             weight=-10.0,
         ),
+        # A fall should not be absorbed by pulling both legs into a tight curl:
+        # that raises the CoM and produces a distorted static pose.  This is
+        # active in both impact and hold, but starts only beyond normal walking
+        # / compliant-bending ranges.
+        "leg_excess_flexion": RewardTermCfg(
+            func=mdp.ExcessLegFlexionPenalty,
+            weight=-8.0,
+            params={"knee_limit": 1.15, "hip_limit": 1.05, "hip_weight": 0.75},
+        ),
+        # Angle limits alone miss the coordinated hip/knee motion that folds
+        # both legs back onto the torso during impact.  Use a geometry-based
+        # impact-only term so the natural hold pose remains unconstrained.
+        "impact_leg_fold": RewardTermCfg(
+            func=mdp.ImpactLegFoldPenalty,
+            weight=-12.0,
+            params={
+                "knee_min_distance": 0.24,
+                "ankle_min_distance": 0.20,
+                "distance_scale": 0.10,
+                "ankle_weight": 0.5,
+            },
+        ),
         # Numerical safety only. At the default dt this is a -100 terminal cost,
         # so deliberately destabilizing the simulation cannot improve return.
         "simulation_failure": RewardTermCfg(
@@ -437,6 +459,34 @@ def _build_rewards() -> dict[str, RewardTermCfg]:
             func=mdp.penalty_post_fall_action_drift,
             weight=-0.05,
             params={},
+        ),
+        # A quiet pose is only useful if it does not rest the head on the
+        # terrain.  These are hold-only terms; the impact phase remains free
+        # to use the body and limbs for energy absorption.
+        "post_fall_head_clearance": RewardTermCfg(
+            func=mdp.PostFallHeadClearancePenalty,
+            weight=-6.0,
+            params={"min_clearance": 0.04},
+        ),
+        "post_fall_head_contact": RewardTermCfg(
+            func=mdp.PostFallHeadContactPenalty,
+            weight=-8.0,
+            params={"free_force": 5.0, "force_scale": 50.0, "hold_only": True},
+        ),
+        # The paper's heterogeneous contact cost already penalizes head load,
+        # but this dedicated, bounded term makes peak head impact an explicit
+        # optimization target even before the hold phase begins.
+        "head_impact_contact": RewardTermCfg(
+            func=mdp.PostFallHeadContactPenalty,
+            weight=-3.0,
+            params={"free_force": 20.0, "force_scale": 100.0, "hold_only": False},
+        ),
+        # Avoid a statically frozen but high-energy curled posture without
+        # prescribing a particular final configuration.
+        "post_fall_limb_height": RewardTermCfg(
+            func=mdp.PostFallExcessLimbHeightPenalty,
+            weight=-2.0,
+            params={"height_margin": 0.30},
         ),
     }
 
@@ -499,15 +549,21 @@ def _build_reset_event(stage2: bool = False) -> EventTermCfg:
             },
         )
     return EventTermCfg(
-        func=mdp.reset_falling_state,
-        mode="reset",
-        params={
-            "height_range": (1.0, 1.2),
-            "horizontal_speed_range": (0.0, 2.0),
-            "downward_speed_range": (-3.0, -1.5),
-            "ang_vel_range": (-3.0, 3.0),
-        },
-    )
+            func=mdp.reset_falling_state,
+            mode="reset",
+            params={
+                # Walking-instability envelope: feet remain the lowest
+                # support, and the robot starts near its standing height.
+                "height_range": (0.78, 0.86),
+                "horizontal_speed_range": (0.3, 1.8),
+                "downward_speed_range": (-0.35, 0.05),
+                "orientation_tilt_range": (-0.18, 0.18),
+                "fall_angular_speed_range": (1.5, 4.5),
+                "yaw_angular_speed_range": (-1.0, 1.0),
+                "joint_noise": 0.05,
+                "joint_velocity_range": (-0.3, 0.3),
+            },
+        )
 
 
 def _build_events(stage2: bool = False) -> dict[str, EventTermCfg]:

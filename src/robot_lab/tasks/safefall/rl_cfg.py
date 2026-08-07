@@ -40,8 +40,10 @@ def unitree_g1_safefall_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             obs_normalization=False,
             distribution_cfg={
                 "class_name": "GaussianDistribution",
-                "init_std": 1.0,
-                "std_range": (1.0e-3, 2.0),
+                # The previous run drove this to the 2.0 ceiling, producing
+                # aggressive impact actions and severe leg folding.
+                "init_std": 0.5,
+                "std_range": (5.0e-2, 0.75),
                 "std_type": "scalar",
             },
         ),
@@ -57,7 +59,7 @@ def unitree_g1_safefall_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             value_loss_coef=1.0,
             use_clipped_value_loss=True,
             clip_param=0.2,
-            entropy_coef=0.01,
+            entropy_coef=0.001,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=1.0e-3,
@@ -68,7 +70,9 @@ def unitree_g1_safefall_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
         experiment_name="safefall_g1",
-        save_interval=500,
+        # Stage I runs can be interrupted or inspected frequently.  Preserve
+        # each 100-update milestone for regression/video evaluation.
+        save_interval=100,
         num_steps_per_env=40,                   # Paper: 40 steps per episode
         max_iterations=5000,
         clip_actions=10.0,  # Absolute targets are clipped per joint by the env.

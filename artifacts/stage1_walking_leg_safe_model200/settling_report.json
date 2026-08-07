@@ -1,0 +1,31 @@
+{
+  "contact_step": 2,
+  "contact_time_s": 0.04,
+  "settled_step_5_policy_steps": null,
+  "settled_time_s": null,
+  "limits": {
+    "root_lin_speed": 0.19590106010437014,
+    "root_ang_speed": 0.7076822757720947,
+    "joint_vel_rms": 1.5911745071411134
+  },
+  "precontact_peaks": {
+    "root_lin_speed": 1.9590106010437012,
+    "root_ang_speed": 7.076822757720947,
+    "joint_vel_rms": 15.911745071411133
+  },
+  "tail20_mean": {
+    "root_lin_speed": 0.2860284447669983,
+    "root_ang_speed": 1.9750601053237915,
+    "joint_vel_rms": 1.7744474411010742,
+    "body_lin_speed_max": 1.449855089187622,
+    "body_ang_speed_max": 6.778891086578369,
+    "joint_acc_rms": 155.22848510742188,
+    "head_clearance_m": 0.3068825602531433,
+    "head_contact_force_n": 0.0,
+    "limb_com_height_m": 0.17559725046157837
+  },
+  "posture_safety": {
+    "minimum_head_clearance_m": 0.08754360675811768,
+    "peak_head_contact_force_n": 0.0
+  }
+}

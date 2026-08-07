@@ -51,6 +51,44 @@ def _record_step(env: ManagerBasedRlEnv) -> dict[str, np.ndarray]:
     qacc = sim_data.qacc[0, joint_ids]
     cfrc_int = sim_data.cfrc_int[0, body_ids]
     cfrc_ext = sim_data.cfrc_ext[0, body_ids]
+    head_local_ids, head_names = asset.find_geoms(("head_collision",), preserve_order=True)
+    if head_names != ["head_collision"]:
+        raise RuntimeError("SafeFall dynamics report requires head_collision")
+    head_geom_id = int(asset.indexing.geom_ids[head_local_ids[0]])
+    head_radius = float(env.sim.mj_model.geom_size[head_geom_id, 0])
+    head_clearance = (
+        sim_data.geom_xpos[0, head_geom_id, 2]
+        - head_radius
+        - env.scene.env_origins[0, 2]
+    )
+    contact_names = env.scene["ground_contact"].primary_names
+    head_contact_index = contact_names.index("head_collision")
+    ground_force = env.scene["ground_contact"].data.force
+    head_force = (
+        torch.linalg.vector_norm(ground_force[0, head_contact_index], dim=-1)
+        if ground_force is not None else torch.zeros((), device=env.device)
+    )
+    limb_ids = [i for i, name in enumerate(asset.body_names) if name.startswith(("left_", "right_"))]
+    limb_global_ids = body_ids[limb_ids].cpu().numpy()
+    limb_masses = torch.as_tensor(env.sim.mj_model.body_mass[limb_global_ids], device=env.device)
+    limb_height = asset.data.body_com_pos_w[0, limb_ids, 2] - env.scene.env_origins[0, 2]
+    limb_com_height = torch.sum(limb_masses * limb_height) / limb_masses.sum().clamp(min=1.0e-6)
+    torso_id = asset.body_names.index("torso_link")
+    knee_ids = [asset.body_names.index(name) for name in ("left_knee_link", "right_knee_link")]
+    ankle_ids = [
+        asset.body_names.index(name)
+        for name in ("left_ankle_pitch_link", "right_ankle_pitch_link")
+    ]
+    body_com = asset.data.body_com_pos_w[0]
+    torso_com = body_com[torso_id]
+    leg_fold_distance = torch.linalg.vector_norm(
+        body_com[torch.as_tensor(knee_ids + ankle_ids, device=env.device)] - torso_com,
+        dim=-1,
+    )
+    knee_joint_ids = [
+        asset.joint_names.index(name)
+        for name in ("left_knee_joint", "right_knee_joint")
+    ]
     return {
         "body_lin_vel": _to_numpy(body_lin),
         "body_ang_vel": _to_numpy(body_ang),
@@ -62,6 +100,11 @@ def _record_step(env: ManagerBasedRlEnv) -> dict[str, np.ndarray]:
         "qfrc_actuator": _to_numpy(sim_data.qfrc_actuator[0, joint_ids]),
         "contact_force": _contact_force(env),
         "root_height": _to_numpy(asset.data.root_link_pos_w[0, 2:3]),
+        "head_clearance": _to_numpy(head_clearance.unsqueeze(0)),
+        "head_contact_force": _to_numpy(head_force.unsqueeze(0)),
+        "limb_com_height": _to_numpy(limb_com_height.unsqueeze(0)),
+        "leg_fold_distance": _to_numpy(leg_fold_distance),
+        "knee_joint_pos": _to_numpy(asset.data.joint_pos[0, knee_joint_ids]),
     }
 
 
@@ -89,6 +132,11 @@ def _metric_arrays(data: dict[str, np.ndarray], dt: float) -> dict[str, np.ndarr
         "qfrc_actuator_abs": np.abs(data["qfrc_actuator"]),
         "contact_force": data["contact_force"],
         "root_height": data["root_height"].squeeze(-1),
+        "head_clearance": data["head_clearance"].squeeze(-1),
+        "head_contact_force": data["head_contact_force"].squeeze(-1),
+        "limb_com_height": data["limb_com_height"].squeeze(-1),
+        "leg_fold_distance": data["leg_fold_distance"],
+        "knee_joint_pos": data["knee_joint_pos"],
     }
 
 
@@ -124,6 +172,9 @@ def _settling_report(metrics: dict[str, np.ndarray], dt: float) -> dict[str, obj
     settled = np.flatnonzero((quiet_run >= stable_steps) & (np.arange(len(quiet)) >= contact_step))
     settled_step = int(settled[0]) if settled.size else None
     tail = slice(-min(20, len(root_lin)), None)
+    # The training phase locks after 30 physics substeps.  A policy step is
+    # 0.02 s here, so this eight-step slice covers the impact-only reward.
+    impact = slice(contact_step, min(contact_step + 8, len(root_lin)))
     return {
         "contact_step": contact_step,
         "contact_time_s": contact_step * dt,
@@ -142,6 +193,25 @@ def _settling_report(metrics: dict[str, np.ndarray], dt: float) -> dict[str, obj
             "body_lin_speed_max": float(np.mean(body_lin_max[tail])),
             "body_ang_speed_max": float(np.mean(body_ang_max[tail])),
             "joint_acc_rms": float(np.mean(np.sqrt(np.mean(metrics["joint_acc_abs"][:, :] ** 2, axis=1))[tail])),
+            "head_clearance_m": float(np.mean(metrics["head_clearance"][tail])),
+            "head_contact_force_n": float(np.mean(metrics["head_contact_force"][tail])),
+            "limb_com_height_m": float(np.mean(metrics["limb_com_height"][tail])),
+            "minimum_knee_torso_distance_m": float(np.min(metrics["leg_fold_distance"][tail, :2])),
+            "minimum_ankle_torso_distance_m": float(np.min(metrics["leg_fold_distance"][tail, 2:])),
+            "peak_knee_angle_rad": float(np.max(metrics["knee_joint_pos"][tail])),
+        },
+        "posture_safety": {
+            "minimum_head_clearance_m": float(np.min(metrics["head_clearance"])),
+            "peak_head_contact_force_n": float(np.max(metrics["head_contact_force"])),
+            "impact_minimum_knee_torso_distance_m": float(
+                np.min(metrics["leg_fold_distance"][impact, :2])
+            ),
+            "impact_minimum_ankle_torso_distance_m": float(
+                np.min(metrics["leg_fold_distance"][impact, 2:])
+            ),
+            "minimum_knee_torso_distance_m": float(np.min(metrics["leg_fold_distance"][:, :2])),
+            "minimum_ankle_torso_distance_m": float(np.min(metrics["leg_fold_distance"][:, 2:])),
+            "peak_knee_angle_rad": float(np.max(metrics["knee_joint_pos"])),
         },
     }
 
@@ -174,7 +244,7 @@ def _plot_all(metrics: dict[str, np.ndarray], names: dict[str, list[str]], dt: f
     joint_rms = np.sqrt(np.mean(metrics["joint_speed"] ** 2, axis=1))
     joint_acc_rms = np.sqrt(np.mean(metrics["joint_acc_abs"] ** 2, axis=1))
     contact = metrics["contact_force"].max(axis=1)
-    fig, axes = plt.subplots(3, 2, figsize=(14, 10), sharex=True)
+    fig, axes = plt.subplots(4, 2, figsize=(14, 13), sharex=True)
     curves = [
         (root_lin, "root linear speed (m/s)"),
         (root_ang, "root angular speed (rad/s)"),
@@ -182,6 +252,8 @@ def _plot_all(metrics: dict[str, np.ndarray], names: dict[str, list[str]], dt: f
         (joint_acc_rms, "joint acceleration RMS (rad/s²)"),
         (contact, "maximum terrain contact force (N)"),
         (metrics["root_height"], "root height (m)"),
+        (metrics["head_clearance"], "head terrain clearance (m)"),
+        (metrics["limb_com_height"], "mass-weighted limb COM height (m)"),
     ]
     for ax, (value, title) in zip(axes.flat, curves, strict=True):
         ax.plot(times, value, linewidth=1.2)

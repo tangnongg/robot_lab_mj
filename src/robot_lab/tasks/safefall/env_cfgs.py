@@ -485,8 +485,11 @@ def _build_rewards() -> dict[str, RewardTermCfg]:
         # but no lower-leg link may remain held high after impact.
         "post_fall_limb_height": RewardTermCfg(
             func=mdp.PostFallExcessLimbHeightPenalty,
-            weight=-3.0,
-            params={"height_margin": 0.30},
+            # A 0.30 m margin still admitted a static, raised-leg supine
+            # mode. This remains a post-impact-only soft constraint, while
+            # making any leg held appreciably above a lying pose expensive.
+            weight=-8.0,
+            params={"height_margin": 0.20},
         ),
     }
 

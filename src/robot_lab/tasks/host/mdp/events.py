@@ -149,12 +149,7 @@ def reset_standup_success(
         env.host_standup_success = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
         )
-    if not hasattr(env, "host_standing_steps"):
-        env.host_standing_steps = torch.zeros(
-            env.num_envs, dtype=torch.long, device=env.device
-        )
     env.host_standup_success[env_ids] = False
-    env.host_standing_steps[env_ids] = 0
 
 
 def update_standup_success(
@@ -162,35 +157,15 @@ def update_standup_success(
     env_ids: torch.Tensor,
     threshold_height: float = 0.65,
     upright_gravity_z: float = -0.8,
-    required_upright_time_s: float = 0.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> None:
-    """Latch when the robot has entered the upright region.
-
-    The latch is used only to advance the assistance curriculum.  It therefore
-    requires one control step (rather than any standing hold) to confirm that
-    the base is high and upright.  Sustained standing, target-pose tracking and
-    complete stillness are post-task objectives handled by the rewards and the
-    independent evaluator.
-    """
+    """Latch whether each environment has reached the standing stage."""
     if not hasattr(env, "host_standup_success"):
         env.host_standup_success = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
-        )
-    if not hasattr(env, "host_standing_steps"):
-        env.host_standing_steps = torch.zeros(
-            env.num_envs, dtype=torch.long, device=env.device
         )
     asset: Entity = env.scene[asset_cfg.name]
     standing = (
         asset.data.root_link_pos_w[env_ids, 2] > threshold_height
     ) & (asset.data.projected_gravity_b[env_ids, 2] < upright_gravity_z)
-    steps_required = max(1, round(required_upright_time_s / env.step_dt))
-    env.host_standing_steps[env_ids] = torch.where(
-        standing,
-        env.host_standing_steps[env_ids] + 1,
-        torch.zeros_like(env.host_standing_steps[env_ids]),
-    )
-    env.host_standup_success[env_ids] |= (
-        env.host_standing_steps[env_ids] >= steps_required
-    )
+    env.host_standup_success[env_ids] |= standing

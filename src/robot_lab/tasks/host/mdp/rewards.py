@@ -59,6 +59,7 @@ def _tolerance(
 
 def reward_orientation(
     env: "ManagerBasedRlEnv",
+    phase1_height: float = 0.45,
     orientation_threshold: float = 0.99,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -372,49 +373,40 @@ def reward_shank_orientation(
     return reward
 
 
-def reward_ankle_parallel(
+def reward_ground_parallel(
     env: "ManagerBasedRlEnv",
     var_threshold: float = 0.05,
-    min_base_height: float | None = None,
     phase3_height: float = 0.65,
     post_task: bool = False,
-    left_ankle_site_names: tuple[str, ...] | None = None,
-    right_ankle_site_names: tuple[str, ...] | None = None,
+    left_ankle_body_names: list[str] | None = None,
+    right_ankle_body_names: list[str] | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward ankles parallel to ground using five coplanar sites per foot."""
+    """Reward feet parallel to ground (low variance in ankle z height)."""
     asset: Entity = env.scene[asset_cfg.name]
-    site_names = list(asset.site_names)
+    body_names = list(asset.body_names)
 
-    if left_ankle_site_names is None:
-        left_ankle_site_names = (
-            "left_ankle_keypoint_center",
-            "left_ankle_keypoint_front",
-            "left_ankle_keypoint_back",
-            "left_ankle_keypoint_left",
-            "left_ankle_keypoint_right",
-        )
-    if right_ankle_site_names is None:
-        right_ankle_site_names = (
-            "right_ankle_keypoint_center",
-            "right_ankle_keypoint_front",
-            "right_ankle_keypoint_back",
-            "right_ankle_keypoint_left",
-            "right_ankle_keypoint_right",
-        )
+    if left_ankle_body_names is None:
+        left_ankle_body_names = ["left_ankle_roll_link"]
+    if right_ankle_body_names is None:
+        right_ankle_body_names = ["right_ankle_roll_link"]
 
-    left_idx = [site_names.index(name) for name in left_ankle_site_names]
-    right_idx = [site_names.index(name) for name in right_ankle_site_names]
-    left_z = asset.data.site_pos_w[:, left_idx, 2] * 10.0
-    right_z = asset.data.site_pos_w[:, right_idx, 2] * 10.0
-    left_var = left_z.var(dim=1)
-    right_var = right_z.var(dim=1)
+    left_idx = [body_names.index(n) for n in left_ankle_body_names]
+    right_idx = [body_names.index(n) for n in right_ankle_body_names]
+
+    left_z = asset.data.body_link_pos_w[:, left_idx, 2] * 10
+    right_z = asset.data.body_link_pos_w[:, right_idx, 2] * 10
+
+    left_var = (
+        left_z.var(dim=1) if left_z.shape[1] > 1
+        else torch.zeros(env.num_envs, device=env.device)
+    )
+    right_var = (
+        right_z.var(dim=1) if right_z.shape[1] > 1
+        else torch.zeros(env.num_envs, device=env.device)
+    )
     var = (left_var + right_var) / 2.0
     reward = (var < var_threshold).float()
-
-    if min_base_height is not None:
-        standing = asset.data.root_link_pos_w[:, 2] > min_base_height
-        reward = reward * standing.float()
 
     if post_task:
         standup = asset.data.root_link_pos_w[:, 2] > phase3_height
@@ -457,52 +449,16 @@ def reward_style_ang_vel_xy(
 # ---------------------------------------------------------------------------
 
 
-def reward_target_ang_vel(
-    env: "ManagerBasedRlEnv",
-    phase3_height: float = 0.65,
-    velocity_scale: float = 0.5,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Encourage a stationary torso, including yaw, when standing.
-
-    Score each axis independently so a large yaw velocity does not suppress
-    the learning signal for roll and pitch.  The wider kernel also retains a
-    useful gradient for the roughly 2 rad/s rotation present in the original
-    standing policy.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    ang_vel = asset.data.root_link_ang_vel_b
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
-    axis_scores = torch.exp(torch.square(ang_vel) * -velocity_scale)
-    return torch.mean(axis_scores, dim=1) * standup
-
-
 def reward_target_ang_vel_xy(
     env: "ManagerBasedRlEnv",
     phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Backward-compatible alias for the full angular-velocity reward."""
-    return reward_target_ang_vel(env, phase3_height=phase3_height, asset_cfg=asset_cfg)
-
-
-def penalty_target_yaw_ang_vel(
-    env: "ManagerBasedRlEnv",
-    phase3_height: float = 0.65,
-    max_squared_speed: float = 16.0,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Return a bounded yaw-rate cost while the robot is standing.
-
-    The positive full-angular-velocity reward promotes quiet motion in all
-    axes.  This term supplies an unsaturated, rotation-specific signal at the
-    1--2 rad/s yaw rates of the otherwise successful v3 policy.  Bounding the
-    cost prevents a transient fall from dominating the stand-up objective.
-    """
+    """Encourage low angular velocity when standing."""
     asset: Entity = env.scene[asset_cfg.name]
-    yaw_rate_squared = torch.square(asset.data.root_link_ang_vel_b[:, 2])
-    standing = asset.data.root_link_pos_w[:, 2] > phase3_height
-    return yaw_rate_squared.clamp(max=max_squared_speed) * standing.float()
+    ang_vel = asset.data.root_link_ang_vel_b[:, :2]
+    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    return torch.exp(torch.sum(torch.square(ang_vel), dim=1) * -2) * standup
 
 
 def reward_target_lin_vel_xy(
@@ -515,25 +471,6 @@ def reward_target_lin_vel_xy(
     lin_vel = asset.data.root_link_lin_vel_b[:, :2]
     standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
     return torch.exp(torch.sum(torch.square(lin_vel), dim=1) * -5) * standup
-
-
-def reward_feet_lin_vel_xy(
-    env: "ManagerBasedRlEnv",
-    phase3_height: float = 0.65,
-    left_foot_body: str = "left_ankle_pitch_link",
-    right_foot_body: str = "right_ankle_pitch_link",
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Return squared planar foot speed while standing to penalize slip."""
-    asset: Entity = env.scene[asset_cfg.name]
-    body_names = list(asset.body_names)
-    foot_ids = [
-        body_names.index(left_foot_body),
-        body_names.index(right_foot_body),
-    ]
-    foot_vel_xy = asset.data.body_link_lin_vel_w[:, foot_ids, :2]
-    standup = asset.data.root_link_pos_w[:, 2] > phase3_height
-    return torch.sum(torch.square(foot_vel_xy), dim=(1, 2)) * standup.float()
 
 
 def reward_feet_height_var(
@@ -555,46 +492,27 @@ def reward_feet_height_var(
     return torch.exp(diff * -2) * standup
 
 
-def reward_target_dof_pos(
+def reward_target_upper_dof_pos(
     env: "ManagerBasedRlEnv",
     phase3_height: float = 0.65,
     sigma: float = -0.1,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Encourage all policy-controlled joints to reach the target pose."""
+    """Encourage upper body to reach target pose when standing."""
     asset: Entity = env.scene[asset_cfg.name]
-    action_term = env.action_manager.get_term("joint_pos")
-    joint_ids = action_term.target_ids
-    target = asset.data.default_joint_pos[:, joint_ids]
-    current = asset.data.joint_pos[:, joint_ids]
+    joint_names = list(asset.joint_names)
+    upper_idx = [
+        i
+        for i, n in enumerate(joint_names)
+        if any(k in n for k in ["shoulder", "elbow", "wrist"])
+    ]
+    if not upper_idx:
+        return torch.zeros(env.num_envs, device=env.device)
+    target = asset.data.default_joint_pos[:, upper_idx]
+    current = asset.data.joint_pos[:, upper_idx]
     mse = torch.sum(torch.square(current - target), dim=-1)
     standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
     return torch.exp(mse * sigma) * standup
-
-
-def penalty_target_dof_vel_l2(
-    env: "ManagerBasedRlEnv",
-    phase3_height: float = 0.65,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Penalize motion of every controlled joint after reaching stand-up height."""
-    asset: Entity = env.scene[asset_cfg.name]
-    action_term = env.action_manager.get_term("joint_pos")
-    joint_vel = asset.data.joint_vel[:, action_term.target_ids]
-    standing = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
-    return torch.sum(torch.square(joint_vel), dim=-1) * standing
-
-
-def penalty_target_base_lin_vel_l2(
-    env: "ManagerBasedRlEnv",
-    phase3_height: float = 0.65,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Penalize root translation in all three axes while holding the pose."""
-    asset: Entity = env.scene[asset_cfg.name]
-    lin_vel = asset.data.root_link_lin_vel_b
-    standing = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
-    return torch.sum(torch.square(lin_vel), dim=-1) * standing
 
 
 def reward_target_orientation(

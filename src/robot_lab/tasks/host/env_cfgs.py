@@ -258,16 +258,17 @@ def _build_critic_obs(
 
 def _build_rewards(
     task_weight: float = 20.0,
+    phase1_height: float = 0.45,
     phase3_height: float = 0.65,
     target_height: float = 0.75,
 ) -> dict[str, RewardTermCfg]:
-    """All 32 reward terms, with variant-tunable parameters."""
+    """All 27 reward terms, with variant-tunable parameters."""
     return {
         # ---- Task ----
         "task_orientation": RewardTermCfg(
             func=mdp.reward_orientation,
             weight=task_weight,
-            params={"orientation_threshold": 0.99},
+            params={"phase1_height": phase1_height, "orientation_threshold": 0.99},
         ),
         "task_head_height": RewardTermCfg(
             func=mdp.reward_head_height,
@@ -327,10 +328,10 @@ def _build_rewards(
         "style_shank_orientation": RewardTermCfg(
             func=mdp.reward_shank_orientation, weight=10.0
         ),
-        "style_ankle_parallel": RewardTermCfg(
-            func=mdp.reward_ankle_parallel,
-            weight=20.0,
-            params={"min_base_height": 0.65},
+        "style_ground_parallel": RewardTermCfg(
+            # The MJCF has no ankle keypoint sites. Using one body per ankle
+            # makes the variance identically zero, so this term must stay off.
+            func=mdp.reward_ground_parallel, weight=0.0
         ),
         "style_feet_distance": RewardTermCfg(
             func=mdp.reward_feet_distance, weight=-10.0
@@ -339,14 +340,9 @@ def _build_rewards(
             func=mdp.reward_style_ang_vel_xy, weight=1.0
         ),
         # ---- Post-task (target) ----
-        "target_ang_vel": RewardTermCfg(
-            func=mdp.reward_target_ang_vel,
-            weight=20.0,
-            params={"phase3_height": phase3_height},
-        ),
-        "target_yaw_ang_vel_l2": RewardTermCfg(
-            func=mdp.penalty_target_yaw_ang_vel,
-            weight=-1.5,
+        "target_ang_vel_xy": RewardTermCfg(
+            func=mdp.reward_target_ang_vel_xy,
+            weight=10.0,
             params={"phase3_height": phase3_height},
         ),
         "target_lin_vel_xy": RewardTermCfg(
@@ -354,29 +350,14 @@ def _build_rewards(
             weight=10.0,
             params={"phase3_height": phase3_height},
         ),
-        "target_feet_lin_vel_xy": RewardTermCfg(
-            func=mdp.reward_feet_lin_vel_xy,
-            weight=-2.5,
-            params={"phase3_height": phase3_height},
-        ),
         "target_feet_height_var": RewardTermCfg(
             func=mdp.reward_feet_height_var,
             weight=2.5,
             params={"phase3_height": phase3_height},
         ),
-        "target_dof_pos": RewardTermCfg(
-            func=mdp.reward_target_dof_pos,
+        "target_upper_dof_pos": RewardTermCfg(
+            func=mdp.reward_target_upper_dof_pos,
             weight=10.0,
-            params={"phase3_height": phase3_height},
-        ),
-        "target_dof_vel_l2": RewardTermCfg(
-            func=mdp.penalty_target_dof_vel_l2,
-            weight=-0.25,
-            params={"phase3_height": phase3_height},
-        ),
-        "target_base_lin_vel_l2": RewardTermCfg(
-            func=mdp.penalty_target_base_lin_vel_l2,
-            weight=-2.5,
             params={"phase3_height": phase3_height},
         ),
         "target_orientation": RewardTermCfg(
@@ -485,6 +466,7 @@ def unitree_g1_host_env_cfg(
     init_quat: tuple[float, float, float, float] = (1.0, 0.0, -1.0, 0.0),
     init_joint_pos: dict[str, float] | None = None,
     task_weight: float = 20.0,
+    phase1_height: float = 0.45,
     phase3_height: float = 0.65,
     target_height: float = 0.75,
     unactuated_steps: int = 30,
@@ -498,6 +480,7 @@ def unitree_g1_host_env_cfg(
         init_quat: Initial base orientation quaternion (w, x, y, z).
         init_joint_pos: Optional per-joint position overrides.
         task_weight: Weight for the task-achievement reward terms.
+        phase1_height: Base height threshold for early-standing gate.
         phase3_height: Base height threshold for post-task target rewards.
         target_height: Desired standing base height.
         unactuated_steps: Number of steps before traction force activates.
@@ -586,6 +569,7 @@ def unitree_g1_host_env_cfg(
         ),
         rewards=_build_rewards(
             task_weight=task_weight,
+            phase1_height=phase1_height,
             phase3_height=phase3_height,
             target_height=target_height,
         ),
@@ -689,6 +673,7 @@ def unitree_g1_slope_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "right_elbow_joint": 0.0,
         },
         task_weight=25.0,
+        phase1_height=0.4,
         phase3_height=0.6,
         target_height=0.70,
     )

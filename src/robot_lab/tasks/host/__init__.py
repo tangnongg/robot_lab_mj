@@ -5,7 +5,7 @@ each with train and play configurations.
 """
 
 from mjlab.tasks.registry import register_mjlab_task
-from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
+from mjlab.rl import MjlabOnPolicyRunner
 
 from .env_cfgs import (
     unitree_g1_ground_env_cfg,
@@ -28,7 +28,7 @@ register_mjlab_task(
     env_cfg=unitree_g1_ground_env_cfg(),
     play_env_cfg=unitree_g1_ground_env_cfg(play=True),
     rl_cfg=unitree_g1_host_ground_ppo_runner_cfg(),
-    runner_cls=VelocityOnPolicyRunner,
+    runner_cls=MjlabOnPolicyRunner,
 )
 
 # # ---- Platform ----

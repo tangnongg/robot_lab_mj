@@ -33,6 +33,7 @@ def unitree_g1_host_ppo_runner_cfg(
             hidden_dims=(512, 256),
             activation="elu",
             obs_normalization=False,
+            class_name="robot_lab.tasks.host.multi_critic.HoSTMultiCritic",
         ),
         algorithm=RslRlPpoAlgorithmCfg(
             value_loss_coef=1.0,
@@ -47,6 +48,7 @@ def unitree_g1_host_ppo_runner_cfg(
             lam=0.95,
             desired_kl=0.01,
             max_grad_norm=1.0,
+            class_name="robot_lab.tasks.host.multi_critic.HoSTMultiCriticPPO",
         ),
         experiment_name=experiment_name,
         save_interval=100,

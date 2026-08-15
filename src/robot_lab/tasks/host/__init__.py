@@ -9,6 +9,8 @@ from mjlab.rl import MjlabOnPolicyRunner
 
 from .env_cfgs import (
     unitree_g1_ground_env_cfg,
+    unitree_g1_ground_standup_env_cfg,
+    unitree_g1_ground_hold_env_cfg,
     unitree_g1_platform_env_cfg,
     unitree_g1_prone_env_cfg,
     unitree_g1_slope_env_cfg,
@@ -16,17 +18,36 @@ from .env_cfgs import (
 )
 from .rl_cfg import (
     unitree_g1_host_ground_ppo_runner_cfg,
+    unitree_g1_host_ground_standup_only_ppo_runner_cfg,
     unitree_g1_host_platform_ppo_runner_cfg,
     unitree_g1_host_prone_ppo_runner_cfg,
     unitree_g1_host_slope_ppo_runner_cfg,
     unitree_g1_host_wall_ppo_runner_cfg,
 )
 
-# ---- Ground ----
+# ---- Canonical end-to-end ground task ----
 register_mjlab_task(
     task_id="Mjlab-HoST-Ground-Unitree-G1",
     env_cfg=unitree_g1_ground_env_cfg(),
     play_env_cfg=unitree_g1_ground_env_cfg(play=True),
+    rl_cfg=unitree_g1_host_ground_ppo_runner_cfg(),
+    runner_cls=MjlabOnPolicyRunner,
+)
+
+# Historical task IDs below are aliases to the same complete task.  They are
+# kept only so old scripts do not silently select a different objective.
+register_mjlab_task(
+    task_id="Mjlab-HoST-Ground-StandupOnly-Unitree-G1",
+    env_cfg=unitree_g1_ground_standup_env_cfg(),
+    play_env_cfg=unitree_g1_ground_standup_env_cfg(play=True),
+    rl_cfg=unitree_g1_host_ground_standup_only_ppo_runner_cfg(),
+    runner_cls=MjlabOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-HoST-Ground-StandupHold-Unitree-G1",
+    env_cfg=unitree_g1_ground_hold_env_cfg(),
+    play_env_cfg=unitree_g1_ground_hold_env_cfg(play=True),
     rl_cfg=unitree_g1_host_ground_ppo_runner_cfg(),
     runner_cls=MjlabOnPolicyRunner,
 )

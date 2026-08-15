@@ -52,6 +52,18 @@ def _tolerance(
     return torch.where(in_bounds, 1.0, _sigmoid(d.double(), value_at_margin).float())
 
 
+def _post_task_gate(
+    asset: Entity,
+    phase3_height: float,
+    upright_gravity_z: float = -0.8,
+) -> torch.Tensor:
+    """Gate post-task rewards on both standing height and upright attitude."""
+    return (
+        (asset.data.root_link_pos_w[:, 2] > phase3_height)
+        & (asset.data.projected_gravity_b[:, 2] < upright_gravity_z)
+    ).float()
+
+
 # ---------------------------------------------------------------------------
 # Task Rewards
 # ---------------------------------------------------------------------------
@@ -293,7 +305,7 @@ def reward_left_foot_displacement(
     foot_z = asset.data.body_link_pos_w[:, foot_idx, 2]
     mse = torch.sum(torch.square(base_xy - foot_xy), dim=-1).clamp(min=0.3)
     reward = torch.exp(mse * sigma) * (foot_z < 0.3).float()
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return reward * standup
 
 
@@ -313,7 +325,7 @@ def reward_right_foot_displacement(
     foot_z = asset.data.body_link_pos_w[:, foot_idx, 2]
     mse = torch.sum(torch.square(base_xy - foot_xy), dim=-1).clamp(min=0.3)
     reward = torch.exp(mse * sigma) * (foot_z < 0.3).float()
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return reward * standup
 
 
@@ -339,8 +351,6 @@ def reward_knee_deviation(
 def reward_shank_orientation(
     env: "ManagerBasedRlEnv",
     phase1_height: float = 0.45,
-    phase3_height: float = 0.65,
-    post_task: bool = False,
     knee_body_names: list[str] | None = None,
     foot_body_names: list[str] | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -367,17 +377,12 @@ def reward_shank_orientation(
     base_height = (asset.data.root_link_pos_w[:, 2] > phase1_height).float()
     reward = _tolerance(feet_orientation, (0.8, np.inf), 1.0, 0.1) * base_height
 
-    if post_task:
-        standup = asset.data.root_link_pos_w[:, 2] > phase3_height
-        reward = reward * (~standup).float() + standup.float()
     return reward
 
 
 def reward_ground_parallel(
     env: "ManagerBasedRlEnv",
     var_threshold: float = 0.05,
-    phase3_height: float = 0.65,
-    post_task: bool = False,
     left_ankle_body_names: list[str] | None = None,
     right_ankle_body_names: list[str] | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -408,9 +413,6 @@ def reward_ground_parallel(
     var = (left_var + right_var) / 2.0
     reward = (var < var_threshold).float()
 
-    if post_task:
-        standup = asset.data.root_link_pos_w[:, 2] > phase3_height
-        reward = reward * (~standup).float() + standup.float()
     return reward
 
 
@@ -457,7 +459,7 @@ def reward_target_ang_vel_xy(
     """Encourage low angular velocity when standing."""
     asset: Entity = env.scene[asset_cfg.name]
     ang_vel = asset.data.root_link_ang_vel_b[:, :2]
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(torch.sum(torch.square(ang_vel), dim=1) * -2) * standup
 
 
@@ -469,7 +471,7 @@ def reward_target_lin_vel_xy(
     """Encourage low linear velocity when standing."""
     asset: Entity = env.scene[asset_cfg.name]
     lin_vel = asset.data.root_link_lin_vel_b[:, :2]
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(torch.sum(torch.square(lin_vel), dim=1) * -5) * standup
 
 
@@ -488,7 +490,7 @@ def reward_feet_height_var(
     left_h = asset.data.body_link_pos_w[:, left_idx, 2] * 10
     right_h = asset.data.body_link_pos_w[:, right_idx, 2] * 10
     diff = torch.abs(left_h - right_h).clamp(min=0.2)
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(diff * -2) * standup
 
 
@@ -511,7 +513,7 @@ def reward_target_upper_dof_pos(
     target = asset.data.default_joint_pos[:, upper_idx]
     current = asset.data.joint_pos[:, upper_idx]
     mse = torch.sum(torch.square(current - target), dim=-1)
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(mse * sigma) * standup
 
 
@@ -523,7 +525,7 @@ def reward_target_orientation(
     """Encourage flat orientation when standing."""
     asset: Entity = env.scene[asset_cfg.name]
     gravity_proj = asset.data.projected_gravity_b[:, :2]
-    standup = (asset.data.root_link_pos_w[:, 2] > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(torch.sum(torch.square(gravity_proj), dim=1) * -5) * standup
 
 
@@ -536,5 +538,5 @@ def reward_target_base_height(
     """Encourage target base height when standing."""
     asset: Entity = env.scene[asset_cfg.name]
     base_height = asset.data.root_link_pos_w[:, 2]
-    standup = (base_height > phase3_height).float()
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(torch.square(base_height - target_height) * -20) * standup

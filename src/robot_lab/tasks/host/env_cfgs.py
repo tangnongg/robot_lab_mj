@@ -251,6 +251,11 @@ def _build_critic_obs(
     }
 
 
+def _build_critic_phase_obs() -> dict[str, ObservationTermCfg]:
+    """Privileged phase signal used only to select the value head."""
+    return {"phase": ObservationTermCfg(func=mdp.critic_phase)}
+
+
 # ---------------------------------------------------------------------------
 # Rewards builder
 # ---------------------------------------------------------------------------
@@ -549,6 +554,12 @@ def unitree_g1_host_env_cfg(
                 enable_corruption=False,
                 history_length=6,
             ),
+            "critic_phase": ObservationGroupCfg(
+                terms=_build_critic_phase_obs(),
+                concatenate_terms=True,
+                enable_corruption=False,
+                history_length=1,
+            ),
         },
         actions={
             "joint_pos": mdp.RelativeJointPositionActionCfg(
@@ -631,6 +642,16 @@ def unitree_g1_ground_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         init_pos=(0.0, 0.0, 0.5),
         init_quat=(0.70710678, 0.0, -0.70710678, 0.0),
     )
+
+
+def unitree_g1_ground_standup_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Backward-compatible alias for the complete end-to-end task."""
+    return unitree_g1_ground_env_cfg(play=play)
+
+
+def unitree_g1_ground_hold_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Backward-compatible alias for the complete end-to-end task."""
+    return unitree_g1_ground_env_cfg(play=play)
 
 
 def unitree_g1_platform_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

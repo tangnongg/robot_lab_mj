@@ -1,8 +1,8 @@
-"""RL configuration for the G1 HoST stand-up task.
+"""RL configuration for the end-to-end HoST stand-and-hold task.
 
-Five PPO runner variants — one per starting pose (ground, platform, wall,
-slope, prone). All share the same network architecture and algorithm
-hyperparameters; only the experiment name and iteration count differ.
+The actor is trained once on the complete trajectory: starting supine, getting
+up, and then holding a quiet upright posture. The two value heads are an
+internal phase-conditioned critic, not two training stages.
 """
 
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
@@ -33,7 +33,7 @@ def unitree_g1_host_ppo_runner_cfg(
             hidden_dims=(512, 256),
             activation="elu",
             obs_normalization=False,
-            class_name="robot_lab.tasks.host.multi_critic.HoSTMultiCritic",
+            class_name="robot_lab.tasks.host.multi_critic.HoSTTwoPhaseCritic",
         ),
         algorithm=RslRlPpoAlgorithmCfg(
             value_loss_coef=1.0,
@@ -48,7 +48,8 @@ def unitree_g1_host_ppo_runner_cfg(
             lam=0.95,
             desired_kl=0.01,
             max_grad_norm=1.0,
-            class_name="robot_lab.tasks.host.multi_critic.HoSTMultiCriticPPO",
+            # The phase-conditioned critic is a model detail; PPO remains stock.
+            class_name="PPO",
         ),
         experiment_name=experiment_name,
         save_interval=100,
@@ -57,7 +58,19 @@ def unitree_g1_host_ppo_runner_cfg(
         clip_actions=1.0,
         logger="tensorboard",
         upload_model=False,
+        obs_groups={
+            "actor": ("actor",),
+            "critic": ("critic", "critic_phase"),
+        },
     )
+
+
+def unitree_g1_host_standup_only_ppo_runner_cfg(
+    experiment_name: str = "g1_host_ground",
+    max_iterations: int = 12000,
+) -> RslRlOnPolicyRunnerCfg:
+    """Backward-compatible alias for the complete end-to-end configuration."""
+    return unitree_g1_host_ppo_runner_cfg(experiment_name, max_iterations)
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +80,10 @@ def unitree_g1_host_ppo_runner_cfg(
 
 def unitree_g1_host_ground_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     return unitree_g1_host_ppo_runner_cfg("g1_host_ground", 12000)
+
+
+def unitree_g1_host_ground_standup_only_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+    return unitree_g1_host_standup_only_ppo_runner_cfg("g1_host_ground", 12000)
 
 
 def unitree_g1_host_platform_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:

@@ -130,3 +130,17 @@ def action_rescale_obs(
     noise = (torch.rand(env.num_envs, 1, device=env.device) - 0.5) * 0.05
     result = env.host_action_rescale.unsqueeze(1) + noise
     return _zero_during_unactuated(env, result)
+
+
+def critic_phase(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Training-only phase bit: 0 while getting up, 1 after standing.
+
+    The latch is maintained by :func:`update_standup_success` and is never
+    included in the actor observation group, so it cannot be used at deploy
+    time to shortcut the policy.
+    """
+    if not hasattr(env, "host_standup_success"):
+        env.host_standup_success = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    return env.host_standup_success.to(dtype=torch.float32).unsqueeze(-1)

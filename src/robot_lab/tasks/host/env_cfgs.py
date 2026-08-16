@@ -355,19 +355,62 @@ def _build_rewards(
             weight=10.0,
             params={"phase3_height": phase3_height},
         ),
+        # Relative uprightness is yaw-invariant: projected gravity contains
+        # roll/pitch information only, so this does not select a world heading.
+        "target_upright_relative": RewardTermCfg(
+            func=mdp.reward_target_orientation,
+            weight=10.0,
+            params={"phase3_height": phase3_height},
+        ),
+        # ---- Post-task quiet standing ----
+        # These costs are gated by the relative upright/height condition. They
+        # do not prescribe a world-frame yaw or a hand-authored terminal pose.
+        "post_root_ang_vel_l2": RewardTermCfg(
+            func=mdp.reward_post_root_ang_vel_l2,
+            weight=-4.0,
+            params={"phase3_height": phase3_height},
+        ),
+        "post_root_lin_vel_l2": RewardTermCfg(
+            func=mdp.reward_post_root_lin_vel_l2,
+            weight=-2.0,
+            params={"phase3_height": phase3_height},
+        ),
+        "post_joint_vel_l2": RewardTermCfg(
+            func=mdp.reward_post_joint_vel_l2,
+            weight=-0.05,
+            params={"phase3_height": phase3_height},
+        ),
+        "post_joint_acc_l2": RewardTermCfg(
+            func=mdp.reward_post_joint_acc_l2,
+            weight=-1.0e-6,
+            params={"phase3_height": phase3_height},
+        ),
+        "post_action_rate_l2": RewardTermCfg(
+            func=mdp.reward_post_action_rate_l2,
+            weight=-0.1,
+            params={"phase3_height": phase3_height},
+        ),
+        "post_smoothness_l2": RewardTermCfg(
+            func=mdp.reward_post_smoothness_l2,
+            weight=-0.05,
+            params={"phase3_height": phase3_height},
+        ),
+        "post_feet_slip": RewardTermCfg(
+            func=mdp.reward_post_feet_slip,
+            weight=-5.0,
+            params={"phase3_height": phase3_height},
+        ),
+        "post_pose_drift": RewardTermCfg(
+            func=mdp.reward_post_pose_drift,
+            weight=-1.0,
+        ),
+        "post_action_drift": RewardTermCfg(
+            func=mdp.reward_post_action_drift,
+            weight=-0.5,
+        ),
         "target_feet_height_var": RewardTermCfg(
             func=mdp.reward_feet_height_var,
             weight=2.5,
-            params={"phase3_height": phase3_height},
-        ),
-        "target_upper_dof_pos": RewardTermCfg(
-            func=mdp.reward_target_upper_dof_pos,
-            weight=10.0,
-            params={"phase3_height": phase3_height},
-        ),
-        "target_orientation": RewardTermCfg(
-            func=mdp.reward_target_orientation,
-            weight=10.0,
             params={"phase3_height": phase3_height},
         ),
         "target_base_height": RewardTermCfg(

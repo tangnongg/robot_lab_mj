@@ -149,7 +149,30 @@ def reset_standup_success(
         env.host_standup_success = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
         )
+    if not hasattr(env, "host_post_task_steps"):
+        env.host_post_task_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    asset: Entity = env.scene[asset_cfg.name]
+    num_joints = asset.data.joint_pos.shape[1]
+    num_actions = env.action_manager.action.shape[1]
+    if not hasattr(env, "host_post_pose_locked"):
+        env.host_post_pose_locked = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    if not hasattr(env, "host_joint_pose_ref"):
+        env.host_joint_pose_ref = torch.zeros(
+            env.num_envs, num_joints, device=env.device
+        )
+    if not hasattr(env, "host_action_ref"):
+        env.host_action_ref = torch.zeros(
+            env.num_envs, num_actions, device=env.device
+        )
     env.host_standup_success[env_ids] = False
+    env.host_post_task_steps[env_ids] = 0
+    env.host_post_pose_locked[env_ids] = False
+    env.host_joint_pose_ref[env_ids] = 0.0
+    env.host_action_ref[env_ids] = 0.0
 
 
 def update_standup_success(
@@ -164,8 +187,49 @@ def update_standup_success(
         env.host_standup_success = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
         )
+    if not hasattr(env, "host_post_task_steps"):
+        env.host_post_task_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
     asset: Entity = env.scene[asset_cfg.name]
+    num_joints = asset.data.joint_pos.shape[1]
+    num_actions = env.action_manager.action.shape[1]
+    if not hasattr(env, "host_post_pose_locked"):
+        env.host_post_pose_locked = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    if not hasattr(env, "host_joint_pose_ref"):
+        env.host_joint_pose_ref = torch.zeros(
+            env.num_envs, num_joints, device=env.device
+        )
+    if not hasattr(env, "host_action_ref"):
+        env.host_action_ref = torch.zeros(
+            env.num_envs, num_actions, device=env.device
+        )
     standing = (
         asset.data.root_link_pos_w[env_ids, 2] > threshold_height
     ) & (asset.data.projected_gravity_b[env_ids, 2] < upright_gravity_z)
     env.host_standup_success[env_ids] |= standing
+    active = env.host_standup_success[env_ids]
+    env.host_post_task_steps[env_ids] = torch.where(
+        active,
+        env.host_post_task_steps[env_ids] + 1,
+        torch.zeros_like(env.host_post_task_steps[env_ids]),
+    )
+    # Let the final contact adjustments settle, then lock the naturally
+    # emerging joint/action state.  This is a per-episode reference, not a
+    # hand-written pose or world-frame orientation target.
+    lock_now = (
+        active
+        & ~env.host_post_pose_locked[env_ids]
+        & (env.host_post_task_steps[env_ids] >= 25)
+    )
+    env.host_joint_pose_ref[env_ids] = torch.where(
+        lock_now[:, None], asset.data.joint_pos[env_ids], env.host_joint_pose_ref[env_ids]
+    )
+    env.host_action_ref[env_ids] = torch.where(
+        lock_now[:, None],
+        env.action_manager.action[env_ids],
+        env.host_action_ref[env_ids],
+    )
+    env.host_post_pose_locked[env_ids] |= lock_now

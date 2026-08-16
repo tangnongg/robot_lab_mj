@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import ContactSensor
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -62,6 +63,28 @@ def _post_task_gate(
         (asset.data.root_link_pos_w[:, 2] > phase3_height)
         & (asset.data.projected_gravity_b[:, 2] < upright_gravity_z)
     ).float()
+
+
+def _post_task_settled(
+    env: "ManagerBasedRlEnv",
+    asset: Entity,
+    phase3_height: float,
+    settle_steps: int = 25,
+) -> torch.Tensor:
+    """Post-task gate delayed until the upright state has settled briefly."""
+    gate = _post_task_gate(asset, phase3_height)
+    steps = getattr(env, "host_post_task_steps", None)
+    if steps is None:
+        return gate
+    return gate * (steps >= settle_steps).float()
+
+
+def _post_pose_lock(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Return the per-episode natural-pose lock mask."""
+    locked = getattr(env, "host_post_pose_locked", None)
+    if locked is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return locked.float()
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +486,17 @@ def reward_target_ang_vel_xy(
     return torch.exp(torch.sum(torch.square(ang_vel), dim=1) * -2) * standup
 
 
+def reward_post_root_ang_vel_l2(
+    env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task cost for all three root angular-velocity components."""
+    asset: Entity = env.scene[asset_cfg.name]
+    standup = _post_task_settled(env, asset, phase3_height)
+    return torch.sum(torch.square(asset.data.root_link_ang_vel_b), dim=1) * standup
+
+
 def reward_target_lin_vel_xy(
     env: "ManagerBasedRlEnv",
     phase3_height: float = 0.65,
@@ -473,6 +507,131 @@ def reward_target_lin_vel_xy(
     lin_vel = asset.data.root_link_lin_vel_b[:, :2]
     standup = _post_task_gate(asset, phase3_height)
     return torch.exp(torch.sum(torch.square(lin_vel), dim=1) * -5) * standup
+
+
+def reward_post_root_lin_vel_l2(
+    env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task cost for all three root linear-velocity components."""
+    asset: Entity = env.scene[asset_cfg.name]
+    standup = _post_task_settled(env, asset, phase3_height)
+    return torch.sum(torch.square(asset.data.root_link_lin_vel_b), dim=1) * standup
+
+
+def reward_post_joint_vel_l2(
+    env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task cost for residual joint motion."""
+    asset: Entity = env.scene[asset_cfg.name]
+    standup = _post_task_settled(env, asset, phase3_height)
+    return torch.sum(torch.square(asset.data.joint_vel), dim=1) * standup
+
+
+def reward_post_joint_acc_l2(
+    env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task cost for high-frequency joint jitter."""
+    asset: Entity = env.scene[asset_cfg.name]
+    standup = _post_task_settled(env, asset, phase3_height)
+    return torch.sum(torch.square(asset.data.joint_acc), dim=1) * standup
+
+
+def reward_post_action_rate_l2(
+    env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task cost for changing the joint targets."""
+    asset: Entity = env.scene[asset_cfg.name]
+    standup = _post_task_settled(env, asset, phase3_height)
+    delta = env.action_manager.action - env.action_manager.prev_action
+    return torch.sum(torch.square(delta), dim=1) * standup
+
+
+def reward_post_smoothness_l2(
+    env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task cost for second-order target changes."""
+    asset: Entity = env.scene[asset_cfg.name]
+    standup = _post_task_settled(env, asset, phase3_height)
+    action = env.action_manager.action
+    prev = env.action_manager.prev_action
+    if hasattr(env, "host_last_last_action"):
+        delta2 = action - 2 * prev + env.host_last_last_action
+    else:
+        delta2 = action - prev
+    return torch.sum(torch.square(delta2), dim=1) * standup
+
+
+def reward_post_pose_drift(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize drifting from the naturally captured standing joint pose."""
+    asset: Entity = env.scene[asset_cfg.name]
+    reference = getattr(env, "host_joint_pose_ref", None)
+    if reference is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.mean(torch.square(asset.data.joint_pos - reference), dim=1) * _post_pose_lock(env)
+
+
+def reward_post_action_drift(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Penalize changing the target action after the natural pose is locked."""
+    reference = getattr(env, "host_action_ref", None)
+    if reference is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.mean(
+        torch.square(env.action_manager.action - reference), dim=1
+    ) * _post_pose_lock(env)
+
+
+def _foot_contact_by_side(
+    contact_sensor: ContactSensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return per-environment left/right contact masks from foot geoms."""
+    found = contact_sensor.data.found
+    if found is None:
+        raise RuntimeError("feet_ground_contact must provide the 'found' field")
+    if found.ndim == 3:
+        found = found.squeeze(-1)
+    names = [str(name).lower() for name in contact_sensor.primary_names]
+    left_ids = [i for i, name in enumerate(names) if "left_foot" in name]
+    right_ids = [i for i, name in enumerate(names) if "right_foot" in name]
+    if not left_ids or not right_ids:
+        any_contact = (found > 0).any(dim=1)
+        return any_contact, any_contact
+    left = (found[:, left_ids] > 0).any(dim=1)
+    right = (found[:, right_ids] > 0).any(dim=1)
+    return left, right
+
+
+def reward_post_feet_slip(
+    env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
+    sensor_name: str = "feet_ground_contact",
+    left_foot_body: str = "left_ankle_roll_link",
+    right_foot_body: str = "right_ankle_roll_link",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Post-task cost for horizontal velocity of feet that are in contact."""
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    body_names = list(asset.body_names)
+    foot_ids = [body_names.index(left_foot_body), body_names.index(right_foot_body)]
+    foot_vel_xy = asset.data.body_link_lin_vel_w[:, foot_ids, :2]
+    left_contact, right_contact = _foot_contact_by_side(sensor)
+    contact = torch.stack((left_contact, right_contact), dim=1).to(foot_vel_xy.dtype)
+    cost = torch.sum(torch.square(foot_vel_xy).sum(dim=-1) * contact, dim=1)
+    standup = _post_task_settled(env, asset, phase3_height)
+    return cost * standup
 
 
 def reward_feet_height_var(

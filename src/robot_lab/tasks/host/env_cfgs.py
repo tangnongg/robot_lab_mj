@@ -252,7 +252,13 @@ def _build_critic_obs(
 
 
 def _build_critic_phase_obs() -> dict[str, ObservationTermCfg]:
-    """Privileged phase signal used only to select the value head."""
+    """Privileged phase bit used only to select the value head.
+
+    Keep this one-dimensional input stable so a known-good two-critic
+    checkpoint can be resumed while the actor is refined for quiet standing.
+    Hold progress is already present in the reward and does not need to be
+    exposed as a critic shortcut.
+    """
     return {"phase": ObservationTermCfg(func=mdp.critic_phase)}
 
 
@@ -264,8 +270,9 @@ def _build_critic_phase_obs() -> dict[str, ObservationTermCfg]:
 def _build_rewards(
     task_weight: float = 20.0,
     phase1_height: float = 0.45,
-    phase3_height: float = 0.65,
+    phase3_height: float = 0.60,
     target_height: float = 0.75,
+    no_orientation: bool = False,
 ) -> dict[str, RewardTermCfg]:
     """All 27 reward terms, with variant-tunable parameters."""
     return {
@@ -278,7 +285,33 @@ def _build_rewards(
         "task_head_height": RewardTermCfg(
             func=mdp.reward_head_height,
             weight=task_weight,
+            # Keep the original broad height shaping: it gives a useful
+            # gradient throughout the large supine-to-upright correction and
+            # does not make the post-task pose itself an absolute target.
             params={"target_head_height": 1.0, "target_head_margin": 1.0},
+        ),
+        "task_hold_progress": RewardTermCfg(
+            func=mdp.reward_standup_hold_progress,
+            # Continuous hold is the post-task objective; keep its progress
+            # signal comparable to the two stand-up shaping terms after the
+            # environment dt scaling.
+            weight=20.0,
+            params={
+                "threshold_height": 0.60,
+                "min_torso_height": 0.66,
+                "upright_gravity_z": -0.70,
+                # Filled per episode by the outer curriculum: early levels
+                # can score a short hold immediately, then the settling delay
+                # grows to the final 35 policy steps.
+                "settle_steps": 0,
+                "quiet_root_ang_vel": 1.0,
+                "quiet_root_lin_vel": 0.6,
+                "quiet_joint_vel": 2.0,
+                "quiet_root_ang_vel_initial": 8.0,
+                "quiet_root_lin_vel_initial": 4.0,
+                "quiet_joint_vel_initial": 20.0,
+                "no_orientation": no_orientation,
+            },
         ),
         # ---- Regularization ----
         "regu_dof_acc": RewardTermCfg(
@@ -408,10 +441,19 @@ def _build_rewards(
             func=mdp.reward_post_action_drift,
             weight=-0.5,
         ),
-        "target_feet_height_var": RewardTermCfg(
-            func=mdp.reward_feet_height_var,
-            weight=2.5,
-            params={"phase3_height": phase3_height},
+        # One joint-space term covers the complete mirrored standing pose:
+        # waist yaw, both legs, and every policy-controlled arm/hand joint.
+        "post_symmetric_pose": RewardTermCfg(
+            func=mdp.reward_post_symmetric_pose,
+            weight=-1.5,
+            params={"phase3_height": phase3_height, "settle_steps": 35},
+        ),
+        # The only separate geometric term is for the support polygon: feet
+        # stay compact, aligned front/back, and parallel in the root frame.
+        "post_foot_alignment": RewardTermCfg(
+            func=mdp.reward_post_foot_alignment,
+            weight=-1.0,
+            params={"phase3_height": phase3_height, "settle_steps": 35},
         ),
         "target_base_height": RewardTermCfg(
             func=mdp.reward_target_base_height,
@@ -431,6 +473,7 @@ def _build_events(
     no_orientation: bool = False,
     initial_force: float = 200.0,
     initial_action_rescale: float = 1.0,
+    initial_hold_steps: int = 5,
 ) -> dict[str, EventTermCfg]:
     return {
         # Reset
@@ -476,6 +519,9 @@ def _build_events(
         "reset_standup_success": EventTermCfg(
             func=mdp.reset_standup_success,
             mode="reset",
+            params={
+                "initial_hold_steps": initial_hold_steps,
+            },
         ),
         # Interval — traction force (every step)
         "traction_force": EventTermCfg(
@@ -498,6 +544,36 @@ def _build_events(
             func=mdp.update_standup_success,
             mode="interval",
             interval_range_s=(0.0, 0.0),
+            params={
+                # The previous latch was above the height reached by the
+                # emerging upright policy.  These thresholds still exclude
+                # kneeling while allowing the post critic to observe and
+                # stabilize the learned standing state.
+                # Broad candidate latch: the hold gate below remains the
+                # actual standing requirement and continues to demand the
+                # higher torso/root height.
+                "threshold_height": 0.55,
+                "upright_gravity_z": -0.55,
+                "min_torso_height": 0.45,
+                # Enter the post critic after one upright frame.  The same
+                # outer curriculum then grows the hold and quiet requirements.
+                "candidate_steps": 1,
+                "hold_steps": initial_hold_steps,
+                "hold_threshold_height": 0.60,
+                "hold_min_torso_height": 0.56,
+                "hold_upright_gravity_z": -0.70,
+                "hold_threshold_height_initial": 0.52,
+                "hold_min_torso_height_initial": 0.45,
+                "hold_upright_gravity_z_initial": -0.55,
+                "hold_settle_steps": 0,
+                "quiet_root_ang_vel": 1.0,
+                "quiet_root_lin_vel": 0.6,
+                "quiet_joint_vel": 2.0,
+                "quiet_root_ang_vel_initial": 8.0,
+                "quiet_root_lin_vel_initial": 4.0,
+                "quiet_joint_vel_initial": 20.0,
+                "no_orientation": no_orientation,
+            },
         ),
     }
 
@@ -558,6 +634,8 @@ def unitree_g1_host_env_cfg(
     nonfeet_ground = _make_nonfeet_contact_sensor()
     initial_force = 0.0 if play else 200.0
     initial_action_rescale = 0.25 if play else 1.0
+    initial_hold_steps = 1
+    final_hold_steps = 250
 
     cfg = ManagerBasedRlEnvCfg(
         decimation=4,
@@ -620,12 +698,14 @@ def unitree_g1_host_env_cfg(
             no_orientation=no_orientation,
             initial_force=initial_force,
             initial_action_rescale=initial_action_rescale,
+            initial_hold_steps=initial_hold_steps,
         ),
         rewards=_build_rewards(
             task_weight=task_weight,
             phase1_height=phase1_height,
             phase3_height=phase3_height,
             target_height=target_height,
+            no_orientation=no_orientation,
         ),
         terminations={
             "time_out": TerminationTermCfg(
@@ -645,11 +725,29 @@ def unitree_g1_host_env_cfg(
                 func=mdp.traction_force_curriculum,
                 params={
                     "initial_force": initial_force,
-                    "force_decrement": 20.0,
-                    "action_rescale_decrement": 0.02,
+                    # A single shared level maps linearly to force, action
+                    # scale, and hold duration. It changes only after a full
+                    # performance window, avoiding per-environment drift.
                     "initial_action_rescale": initial_action_rescale,
                     "min_action_rescale": 0.25,
-                    "threshold_height": 0.65,
+                    "initial_hold_steps": initial_hold_steps,
+                    "final_hold_steps": final_hold_steps,
+                    "initial_hold_settle_steps": 0,
+                    "final_hold_settle_steps": 35,
+                    # A 1024-episode window gives each difficulty level
+                    # enough samples while allowing the full assistance and
+                    # quiet-motion course to complete in one practical run.
+                    "window_episodes": 1024,
+                    "promote_success_rate": 0.50,
+                    "demote_success_rate": 0.15,
+                    "promote_level_step": 0.10,
+                    "demote_level_step": 0.05,
+                    "quiet_root_ang_vel_initial": 8.0,
+                    "quiet_root_ang_vel_final": 1.0,
+                    "quiet_root_lin_vel_initial": 4.0,
+                    "quiet_root_lin_vel_final": 0.6,
+                    "quiet_joint_vel_initial": 20.0,
+                    "quiet_joint_vel_final": 2.0,
                 },
             ),
         },

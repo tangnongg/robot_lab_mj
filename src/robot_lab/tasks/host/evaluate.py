@@ -97,12 +97,6 @@ def main() -> None:
 
     asset = base_env.scene["robot"]
     body_names = list(asset.body_names)
-    torso_idx = body_names.index("torso_link")
-    foot_ids = [
-        body_names.index("left_ankle_roll_link"),
-        body_names.index("right_ankle_roll_link"),
-    ]
-
     obs = env.get_observations()
     max_base_height = torch.zeros(args.num_envs, device=base_env.device)
     max_head_height = torch.zeros_like(max_base_height)
@@ -124,13 +118,14 @@ def main() -> None:
             obs, _, dones, extras = env.step(actions)
 
         base_height = asset.data.root_link_pos_w[:, 2]
-        head_height = asset.data.body_link_pos_w[:, torso_idx, 2]
-        feet_height = asset.data.body_link_pos_w[:, foot_ids, 2].mean(dim=-1)
-        relative_head_height = head_height - feet_height
+        head_idx = list(asset.site_names).index("head_link")
+        # Match the training reward/event definition exactly: world-frame
+        # height of the head_link site, not height relative to the feet.
+        head_height = asset.data.site_pos_w[:, head_idx, 2]
         gravity_z = asset.data.projected_gravity_b[:, 2]
 
         max_base_height.copy_(torch.maximum(max_base_height, base_height))
-        max_head_height.copy_(torch.maximum(max_head_height, relative_head_height))
+        max_head_height.copy_(torch.maximum(max_head_height, head_height))
         upright = (base_height > 0.65) & (gravity_z < -0.9)
         upright_steps = torch.where(upright, upright_steps + 1, 0)
         best_upright_steps.copy_(torch.maximum(best_upright_steps, upright_steps))
@@ -149,7 +144,7 @@ def main() -> None:
             force = getattr(base_env, "host_traction_force")[0].item()
             print(
                 f"trace step={step:04d} base_z={base_height[0].item():.3f} "
-                f"head_rel={relative_head_height[0].item():.3f} "
+                f"head_z={head_height[0].item():.3f} "
                 f"gravity_z={gravity_z[0].item():.3f} force={force:.1f} beta={beta:.2f}",
                 flush=True,
             )

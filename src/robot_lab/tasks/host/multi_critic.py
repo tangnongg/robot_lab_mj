@@ -3,9 +3,9 @@
 The policy is shared across the whole episode, while the value function has
 two independent heads:
 
-* ``standup_critic`` is used before the robot reaches the standing gate.
-* ``post_task_critic`` is used after the gate and learns the standing/holding
-  objective.
+* ``standup_critic`` is used before the realtime stand-up phase.
+* ``post_task_critic`` is additionally activated by that phase and learns the
+  standing/holding residual while the stand-up value remains active.
 
 The phase bit is present only in the critic observation group.  It is therefore
 available during training, but is not part of the deployable actor input.
@@ -21,7 +21,7 @@ from rsl_rl.utils import unpad_trajectories
 from tensordict import TensorDict
 
 class HoSTTwoPhaseCritic(MLPModel):
-    """Two independent value heads selected by the critic-only phase bit."""
+    """Stand-up value plus an optional post-task residual value head."""
 
     _phase_obs_group = "critic_phase"
     num_heads = 2
@@ -67,7 +67,12 @@ class HoSTTwoPhaseCritic(MLPModel):
         standup_value = self.standup_critic(latent)
         post_task_value = self.post_task_critic(latent)
         phase = obs[self._phase_obs_group][..., 0].to(dtype=torch.bool)
-        return torch.where(phase.unsqueeze(-1), post_task_value, standup_value)
+        # The post-task branch is an additional value estimate, not a
+        # replacement for the stand-up estimate.  Before the latch the value
+        # is V_standup; after it, V_standup + V_post_task.  This preserves the
+        # transition value learned by the stand-up critic while adding the
+        # standing/holding return once the head-height phase is active.
+        return standup_value + phase.unsqueeze(-1) * post_task_value
 
 
 # Backward-compatible name for callers that imported the old HoST critic.

@@ -3,9 +3,9 @@
 The policy is shared across the whole episode, while the value function has
 two independent heads:
 
-* ``standup_critic`` is used before the realtime stand-up phase.
-* ``post_task_critic`` is additionally activated by that phase and learns the
-  standing/holding residual while the stand-up value remains active.
+* ``standup_critic`` is used during STANDUP and the ten-frame transition.
+* ``post_task_critic`` is additionally activated only in POST_TASK and learns
+  the standing/holding residual while the stand-up value remains active.
 
 The phase bit is present only in the critic observation group.  It is therefore
 available during training, but is not part of the deployable actor input.

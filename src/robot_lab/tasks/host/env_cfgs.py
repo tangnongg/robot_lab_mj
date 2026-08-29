@@ -272,7 +272,7 @@ def _build_rewards(
     phase1_height: float = 0.45,
     no_orientation: bool = False,
 ) -> dict[str, RewardTermCfg]:
-    """All 27 reward terms, with variant-tunable parameters."""
+    """Task, regularization, style, and post-task reward terms."""
     return {
         # ---- Task ----
         "task_orientation": RewardTermCfg(
@@ -285,25 +285,22 @@ def _build_rewards(
             # Strong dense progress signal; saturates at the standing lower
             # bound and does not penalize a taller head position.
             weight=40.0,
-            # The nominal straight-leg G1 pose reaches about 1.27 m at the
-            # head site.  A 1.35 m lower bound keeps the dense signal active
-            # through hip/knee extension instead of accepting a half-sit.
+            # Keep the dense shaping target above the state-machine gate so
+            # the policy is still encouraged to extend fully upright.
             params={"min_head_height": 1.35, "progress_start_height": 0.0},
         ),
         "task_hold_progress": RewardTermCfg(
             func=mdp.reward_standup_hold_progress,
-            # Continuous hold is the post-task objective; keep its progress
-            # signal comparable to the two stand-up shaping terms after the
-            # environment dt scaling.
+            # During the ten-frame transition, require the robot to keep the
+            # same standing condition before post-task rewards take over.
             weight=20.0,
             params={
-                "min_head_height": 1.35,
-                "upright_gravity_z": -0.70,
-                "settle_steps": 10,
+                "min_head_height": 1.27,
+                "upright_gravity_z": -0.55,
+                "transition_steps_required": 10,
                 "quiet_root_ang_vel": 0.6,
                 "quiet_root_lin_vel": 0.6,
                 "quiet_joint_vel": 2.0,
-                "hold_steps": 1,
                 "no_orientation": no_orientation,
             },
         ),
@@ -427,14 +424,14 @@ def _build_rewards(
         "post_symmetric_pose": RewardTermCfg(
             func=mdp.reward_post_symmetric_pose,
             weight=-1.5,
-            params={"settle_steps": 10, "ramp_steps": 100},
+            params={"ramp_steps": 100},
         ),
         # The only separate geometric term is for the support polygon: feet
         # stay compact, aligned front/back, and parallel in the root frame.
         "post_foot_alignment": RewardTermCfg(
             func=mdp.reward_post_foot_alignment,
             weight=-1.0,
-            params={"settle_steps": 10, "ramp_steps": 100},
+            params={"ramp_steps": 100},
         ),
     }
 
@@ -518,15 +515,9 @@ def _build_events(
             interval_range_s=(0.0, 0.0),
             params={
                 "upright_gravity_z": -0.55,
-                "min_head_height": 1.35,
+                "min_head_height": 1.27,
                 "candidate_steps": 3,
-                "hold_steps": 1,
-                "hold_min_head_height": 1.35,
-                "hold_upright_gravity_z": -0.70,
-                "hold_settle_steps": 10,
-                "quiet_root_ang_vel": 0.6,
-                "quiet_root_lin_vel": 0.6,
-                "quiet_joint_vel": 2.0,
+                "transition_steps_required": 10,
                 "no_orientation": no_orientation,
             },
         ),
@@ -675,10 +666,8 @@ def unitree_g1_host_env_cfg(
                     "initial_action_rescale": initial_action_rescale,
                     "min_action_rescale": 0.25,
                     "window_episodes": 1024,
-                    "promote_success_rate": 0.50,
-                    "demote_success_rate": 0.20,
-                    "promote_level_step": 0.10,
-                    "demote_level_step": 0.05,
+                    "promote_success_rate": 0.75,
+                    "promote_level_step": 0.05,
                 },
             ),
         },

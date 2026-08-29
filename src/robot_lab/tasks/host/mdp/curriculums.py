@@ -59,12 +59,14 @@ def traction_force_curriculum(
     initial_action_rescale: float = 1.0,
     min_action_rescale: float = 0.25,
     window_episodes: int = 1024,
-    promote_success_rate: float = 0.50,
-    demote_success_rate: float = 0.20,
-    promote_level_step: float = 0.10,
-    demote_level_step: float = 0.05,
+    promote_success_rate: float = 0.75,
+    promote_level_step: float = 0.05,
 ) -> dict[str, torch.Tensor]:
-    """Adapt only traction force and action scale from recent stand-up success."""
+    """Increase difficulty when recent stand-up success reaches the target rate.
+
+    The curriculum is monotonic: force and action scale are only reduced after
+    a full success window, and the level never decreases.
+    """
     _initialize_state(env, initial_force, initial_action_rescale, window_episodes)
     reset_ids = _resolve_reset_ids(env, env_ids)
 
@@ -72,9 +74,9 @@ def traction_force_curriculum(
     if fixed_level is not None:
         env.host_curriculum_level.fill_(float(fixed_level))
 
-    standup_success = getattr(env, "host_standup_success", None)
-    if standup_success is not None and reset_ids.numel() > 0 and fixed_level is None:
-        outcomes = standup_success[reset_ids].bool()
+    standup_reached = getattr(env, "host_standup_reached", None)
+    if standup_reached is not None and reset_ids.numel() > 0 and fixed_level is None:
+        outcomes = standup_reached[reset_ids].bool()
         capacity = env.host_curriculum_window.numel()
         if outcomes.numel() > capacity:
             outcomes = outcomes[-capacity:]
@@ -100,8 +102,6 @@ def traction_force_curriculum(
             rate = env.host_curriculum_last_success_rate
             if rate >= promote_success_rate:
                 env.host_curriculum_level.add_(promote_level_step).clamp_(0.0, 1.0)
-            elif rate < demote_success_rate:
-                env.host_curriculum_level.sub_(demote_level_step).clamp_(0.0, 1.0)
             env.host_curriculum_last_change.copy_(
                 env.host_curriculum_level - previous_level
             )

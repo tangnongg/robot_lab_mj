@@ -139,14 +139,27 @@ def reset_last_last_action(
     env.host_last_last_action[env_ids] = 0.0
 
 
+STANDUP_PHASE = 0
+TRANSITION_PHASE = 1
+POST_TASK_PHASE = 2
+
+
 def reset_standup_success(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor,
 ) -> None:
-    """Reset the compact per-episode stand-up/hold state."""
-    if not hasattr(env, "host_standup_success"):
-        env.host_standup_success = torch.zeros(
+    """Reset the realtime stand-up phase and episode outcome state."""
+    if not hasattr(env, "host_standup_phase"):
+        env.host_standup_phase = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
+        )
+    if not hasattr(env, "host_standup_reached"):
+        env.host_standup_reached = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
+        )
+    if not hasattr(env, "host_standup_transition_steps"):
+        env.host_standup_transition_steps = torch.zeros(
+            env.num_envs, dtype=torch.long, device=env.device
         )
     if not hasattr(env, "host_post_task_steps"):
         env.host_post_task_steps = torch.zeros(
@@ -156,56 +169,42 @@ def reset_standup_success(
         env.host_standup_candidate_steps = torch.zeros(
             env.num_envs, dtype=torch.long, device=env.device
         )
-    if not hasattr(env, "host_standup_lost_steps"):
-        env.host_standup_lost_steps = torch.zeros(
-            env.num_envs, dtype=torch.long, device=env.device
-        )
-    if not hasattr(env, "host_standup_hold_steps"):
-        env.host_standup_hold_steps = torch.zeros(
-            env.num_envs, dtype=torch.long, device=env.device
-        )
-    env.host_standup_success[env_ids] = False
-    env.host_post_task_steps[env_ids] = 0
+    env.host_standup_phase[env_ids] = STANDUP_PHASE
+    env.host_standup_reached[env_ids] = False
     env.host_standup_candidate_steps[env_ids] = 0
-    env.host_standup_lost_steps[env_ids] = 0
-    env.host_standup_hold_steps[env_ids] = 0
+    env.host_standup_transition_steps[env_ids] = 0
+    env.host_post_task_steps[env_ids] = 0
 
 
 def update_standup_success(
     env: "ManagerBasedRlEnv",
     env_ids: torch.Tensor,
     upright_gravity_z: float = -0.55,
-    min_head_height: float = 1.35,
+    min_head_height: float = 1.27,
     candidate_steps: int = 3,
-    hold_steps: int = 1,
-    hold_min_head_height: float = 1.35,
-    hold_upright_gravity_z: float = -0.70,
-    hold_settle_steps: int = 10,
-    quiet_root_ang_vel: float = 0.6,
-    quiet_root_lin_vel: float = 0.6,
-    quiet_joint_vel: float = 2.0,
+    transition_steps_required: int = 10,
     no_orientation: bool = False,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> None:
-    """Update the realtime stand-up phase and fixed standing hold."""
-    if not hasattr(env, "host_standup_success"):
-        env.host_standup_success = torch.zeros(
-            env.num_envs, dtype=torch.bool, device=env.device
-        )
-    if not hasattr(env, "host_post_task_steps"):
-        env.host_post_task_steps = torch.zeros(
+    """Advance the realtime STANDUP -> TRANSITION -> POST_TASK state."""
+    if not hasattr(env, "host_standup_phase"):
+        env.host_standup_phase = torch.zeros(
             env.num_envs, dtype=torch.long, device=env.device
+        )
+    if not hasattr(env, "host_standup_reached"):
+        env.host_standup_reached = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
         )
     if not hasattr(env, "host_standup_candidate_steps"):
         env.host_standup_candidate_steps = torch.zeros(
             env.num_envs, dtype=torch.long, device=env.device
         )
-    if not hasattr(env, "host_standup_lost_steps"):
-        env.host_standup_lost_steps = torch.zeros(
+    if not hasattr(env, "host_standup_transition_steps"):
+        env.host_standup_transition_steps = torch.zeros(
             env.num_envs, dtype=torch.long, device=env.device
         )
-    if not hasattr(env, "host_standup_hold_steps"):
-        env.host_standup_hold_steps = torch.zeros(
+    if not hasattr(env, "host_post_task_steps"):
+        env.host_post_task_steps = torch.zeros(
             env.num_envs, dtype=torch.long, device=env.device
         )
     asset: Entity = env.scene[asset_cfg.name]
@@ -217,49 +216,57 @@ def update_standup_success(
     if not no_orientation:
         standing &= asset.data.projected_gravity_b[env_ids, 2] < upright_gravity_z
 
-    hold_standing = (
-        head_height > hold_min_head_height
-    )
-    if not no_orientation:
-        hold_standing &= (
-            asset.data.projected_gravity_b[env_ids, 2]
-            < hold_upright_gravity_z
-        )
-    hold_standing &= env.host_post_task_steps[env_ids] >= max(hold_settle_steps - 1, 0)
-    hold_standing &= (
-        torch.linalg.vector_norm(
-            asset.data.root_link_ang_vel_b[env_ids, :2], dim=1
-        )
-        < quiet_root_ang_vel
-    )
-    hold_standing &= (
-        torch.linalg.vector_norm(
-            asset.data.root_link_lin_vel_b[env_ids, :2], dim=1
-        )
-        < quiet_root_lin_vel
-    )
-    hold_standing &= (
-        torch.mean(torch.abs(asset.data.joint_vel[env_ids]), dim=1)
-        < quiet_joint_vel
-    )
-    env.host_standup_candidate_steps[env_ids] = torch.where(
-        standing,
+    phase = env.host_standup_phase[env_ids]
+    candidate_steps_now = torch.where(
+        (phase == STANDUP_PHASE) & standing,
         env.host_standup_candidate_steps[env_ids] + 1,
-        torch.zeros_like(env.host_standup_candidate_steps[env_ids]),
+        torch.where(
+            phase == STANDUP_PHASE,
+            torch.zeros_like(env.host_standup_candidate_steps[env_ids]),
+            env.host_standup_candidate_steps[env_ids],
+        ),
     )
-    confirmed = env.host_standup_candidate_steps[env_ids] >= candidate_steps
-    # This is a realtime phase bit, not an episode latch.  Once the
-    # candidate condition is lost, the post-task critic is disabled again.
-    env.host_standup_success[env_ids] = confirmed
-    active = confirmed
-    # Only consecutive, currently-standing frames count toward the hold.
-    env.host_standup_hold_steps[env_ids] = torch.where(
-        active & hold_standing,
-        env.host_standup_hold_steps[env_ids] + 1,
-        torch.zeros_like(env.host_standup_hold_steps[env_ids]),
+    entered_transition = (phase == STANDUP_PHASE) & (
+        candidate_steps_now >= candidate_steps
     )
+    next_phase = torch.where(
+        entered_transition,
+        torch.full_like(phase, TRANSITION_PHASE),
+        phase,
+    )
+    # A failed transition or post-task phase immediately returns to STANDUP.
+    next_phase = torch.where(
+        (phase != STANDUP_PHASE) & ~standing,
+        torch.full_like(next_phase, STANDUP_PHASE),
+        next_phase,
+    )
+    transition_steps = torch.where(
+        entered_transition,
+        torch.zeros_like(env.host_standup_transition_steps[env_ids]),
+        torch.where(
+            (next_phase == TRANSITION_PHASE) & standing,
+            env.host_standup_transition_steps[env_ids] + 1,
+            torch.zeros_like(env.host_standup_transition_steps[env_ids]),
+        ),
+    )
+    enter_post_task = (next_phase == TRANSITION_PHASE) & (
+        transition_steps >= transition_steps_required
+    )
+    next_phase = torch.where(
+        enter_post_task,
+        torch.full_like(next_phase, POST_TASK_PHASE),
+        next_phase,
+    )
+    env.host_standup_phase[env_ids] = next_phase
+    env.host_standup_candidate_steps[env_ids] = torch.where(
+        next_phase == STANDUP_PHASE,
+        candidate_steps_now,
+        torch.zeros_like(candidate_steps_now),
+    )
+    env.host_standup_transition_steps[env_ids] = transition_steps
     env.host_post_task_steps[env_ids] = torch.where(
-        active,
+        next_phase == POST_TASK_PHASE,
         env.host_post_task_steps[env_ids] + 1,
         torch.zeros_like(env.host_post_task_steps[env_ids]),
     )
+    env.host_standup_reached[env_ids] |= entered_transition

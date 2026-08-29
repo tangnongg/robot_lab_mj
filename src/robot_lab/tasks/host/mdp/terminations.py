@@ -50,16 +50,15 @@ def standup_lost(
     the height/orientation hysteresis makes a confirmed stand fail clearly
     once it returns to the kneeling pivot that caused the old spin behavior.
     """
-    confirmed = getattr(env, "host_standup_success", None)
-    if confirmed is None:
+    phase = getattr(env, "host_standup_phase", None)
+    if phase is None:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    confirmed = phase > 0
     asset: Entity = env.scene[asset_cfg.name]
     head_idx = list(asset.site_names).index("head_link")
     head_height = asset.data.site_pos_w[:, head_idx, 2]
-    standing = (
-        (asset.data.root_link_pos_w[:, 2] > min_height)
-        & (asset.data.projected_gravity_b[:, 2] < upright_gravity_z)
-        & (head_height > min_head_height)
+    standing = (head_height > min_head_height) & (
+        asset.data.projected_gravity_b[:, 2] < upright_gravity_z
     )
     if not hasattr(env, "host_standup_lost_steps"):
         env.host_standup_lost_steps = torch.zeros(

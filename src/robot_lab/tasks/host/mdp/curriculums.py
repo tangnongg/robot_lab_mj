@@ -12,6 +12,10 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 
+DEFAULT_WINDOW_EPISODES = 8192
+DEFAULT_PROMOTE_SUCCESS_RATE = 0.75
+
+
 def _resolve_reset_ids(
     env: "ManagerBasedRlEnv", env_ids: Sequence[int] | slice
 ) -> torch.Tensor:
@@ -34,13 +38,16 @@ def _initialize_state(
         ).clamp_(0.0, 1.0)
         env.host_curriculum_last_success_rate = torch.zeros((), device=env.device)
         env.host_curriculum_last_change = torch.zeros((), device=env.device)
-    if not hasattr(env, "host_curriculum_window") or env.host_curriculum_window.numel() != window_episodes:
-        env.host_curriculum_window = torch.zeros(
-            window_episodes, dtype=torch.bool, device=env.device
+    if not hasattr(env, "host_curriculum_window_episodes"):
+        env.host_curriculum_window_episodes = torch.zeros(
+            (), dtype=torch.long, device=env.device
         )
-        env.host_curriculum_window_pointer = torch.zeros((), dtype=torch.long, device=env.device)
-        env.host_curriculum_window_size = torch.zeros((), dtype=torch.long, device=env.device)
-        env.host_curriculum_window_successes = torch.zeros((), dtype=torch.long, device=env.device)
+        env.host_curriculum_window_successes = torch.zeros(
+            (), dtype=torch.long, device=env.device
+        )
+        env.host_curriculum_completed_windows = torch.zeros(
+            (), dtype=torch.long, device=env.device
+        )
     if not hasattr(env, "host_traction_force"):
         env.host_traction_force = torch.full(
             (env.num_envs,), initial_force, dtype=torch.float32, device=env.device
@@ -58,14 +65,15 @@ def traction_force_curriculum(
     initial_force: float = 200.0,
     initial_action_rescale: float = 1.0,
     min_action_rescale: float = 0.25,
-    window_episodes: int = 1024,
-    promote_success_rate: float = 0.75,
+    window_episodes: int = DEFAULT_WINDOW_EPISODES,
+    promote_success_rate: float = DEFAULT_PROMOTE_SUCCESS_RATE,
     promote_level_step: float = 0.05,
 ) -> dict[str, torch.Tensor]:
-    """Increase difficulty when recent stand-up success reaches the target rate.
+    """Increase difficulty after each non-overlapping episode batch.
 
-    The curriculum is monotonic: force and action scale are only reduced after
-    a full success window, and the level never decreases.
+    Exactly ``window_episodes`` completed episodes are accumulated, their
+    stand-up success rate is evaluated, and the counters are then cleared for
+    the next batch. The curriculum is monotonic.
     """
     _initialize_state(env, initial_force, initial_action_rescale, window_episodes)
     reset_ids = _resolve_reset_ids(env, env_ids)
@@ -74,43 +82,36 @@ def traction_force_curriculum(
     if fixed_level is not None:
         env.host_curriculum_level.fill_(float(fixed_level))
 
+    env.host_curriculum_last_change.zero_()
     standup_reached = getattr(env, "host_standup_reached", None)
     if standup_reached is not None and reset_ids.numel() > 0 and fixed_level is None:
         outcomes = standup_reached[reset_ids].bool()
-        capacity = env.host_curriculum_window.numel()
-        if outcomes.numel() > capacity:
-            outcomes = outcomes[-capacity:]
-        count = outcomes.numel()
-        positions = (
-            env.host_curriculum_window_pointer
-            + torch.arange(count, device=env.device, dtype=torch.long)
-        ) % capacity
-        old = env.host_curriculum_window[positions]
-        env.host_curriculum_window[positions] = outcomes
-        env.host_curriculum_window_successes += (
-            outcomes.to(torch.long).sum() - old.to(torch.long).sum()
-        )
-        env.host_curriculum_window_pointer.copy_((positions[-1] + 1) % capacity)
-        env.host_curriculum_window_size.add_(count).clamp_(max=capacity)
-        env.host_curriculum_last_success_rate.copy_(
-            env.host_curriculum_window_successes.float()
-            / env.host_curriculum_window_size.float().clamp(min=1.0)
-        )
+        capacity = int(window_episodes)
+        offset = 0
+        while offset < outcomes.numel():
+            remaining = capacity - int(env.host_curriculum_window_episodes.item())
+            count = min(remaining, outcomes.numel() - offset)
+            batch = outcomes[offset : offset + count]
+            env.host_curriculum_window_episodes.add_(count)
+            env.host_curriculum_window_successes.add_(batch.to(torch.long).sum())
+            offset += count
 
-        if env.host_curriculum_window_size >= capacity:
-            previous_level = env.host_curriculum_level.clone()
-            rate = env.host_curriculum_last_success_rate
-            if rate >= promote_success_rate:
-                env.host_curriculum_level.add_(promote_level_step).clamp_(0.0, 1.0)
-            env.host_curriculum_last_change.copy_(
-                env.host_curriculum_level - previous_level
-            )
-            if env.host_curriculum_last_change.abs() > 0:
-                env.host_curriculum_window.zero_()
-                env.host_curriculum_window_pointer.zero_()
-                env.host_curriculum_window_size.zero_()
+            if int(env.host_curriculum_window_episodes.item()) == capacity:
+                rate = (
+                    env.host_curriculum_window_successes.float() / float(capacity)
+                )
+                env.host_curriculum_last_success_rate.copy_(rate)
+                previous_level = env.host_curriculum_level.clone()
+                if rate >= promote_success_rate:
+                    env.host_curriculum_level.add_(promote_level_step).clamp_(0.0, 1.0)
+                env.host_curriculum_last_change.copy_(
+                    env.host_curriculum_level - previous_level
+                )
+                env.host_curriculum_completed_windows.add_(1)
+                # The reported rate is retained, while counters start a new
+                # independent batch immediately after it is evaluated.
+                env.host_curriculum_window_episodes.zero_()
                 env.host_curriculum_window_successes.zero_()
-                env.host_curriculum_last_success_rate.zero_()
 
     level = env.host_curriculum_level.clamp(0.0, 1.0)
     force = initial_force * (1.0 - level)
@@ -131,9 +132,7 @@ def traction_force_curriculum(
         "level": env.host_curriculum_level,
         "target_force": force,
         "target_action_rescale": action_rescale,
-        "mean_force": env.host_traction_force.mean(),
-        "mean_action_rescale": env.host_action_rescale.mean(),
         "window_success_rate": env.host_curriculum_last_success_rate,
-        "window_episodes": env.host_curriculum_window_size.float(),
+        "window_episodes": env.host_curriculum_window_episodes.float(),
         "last_level_change": env.host_curriculum_last_change,
     }

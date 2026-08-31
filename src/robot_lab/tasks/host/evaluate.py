@@ -12,16 +12,24 @@ import mjlab.tasks  # noqa: F401 - populate the task registry
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
+from robot_lab.tasks.host.mdp.curriculums import DEFAULT_WINDOW_EPISODES
 
 
 TASK_ID = "Mjlab-HoST-Ground-Unitree-G1"
+DEFAULT_CURRICULUM_WINDOW_EPISODES = DEFAULT_WINDOW_EPISODES
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--num-envs", type=int, default=256)
-    parser.add_argument("--episodes", type=int, default=1024)
+    parser.add_argument("--episodes", type=int, default=DEFAULT_CURRICULUM_WINDOW_EPISODES)
+    parser.add_argument(
+        "--window-episodes",
+        type=int,
+        default=DEFAULT_CURRICULUM_WINDOW_EPISODES,
+        help="Number of completed episodes per success-rate window.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trace", action="store_true")
@@ -68,6 +76,12 @@ def _foot_slip_cost(base_env: ManagerBasedRlEnv, asset) -> torch.Tensor:
 
 def main() -> None:
     args = _parse_args()
+    if args.window_episodes <= 0:
+        raise ValueError("--window-episodes must be positive")
+    if args.episodes <= 0 or args.episodes % args.window_episodes != 0:
+        raise ValueError(
+            "--episodes must be a positive multiple of --window-episodes"
+        )
     env_cfg = load_env_cfg(TASK_ID, play=True)
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.episode_length_s = 10.0
@@ -218,8 +232,18 @@ def main() -> None:
         step += 1
 
     result = torch.tensor(completed[: args.episodes])
+    window_rates = [
+        result[start : start + args.window_episodes, 0].float().mean().item()
+        for start in range(0, args.episodes, args.window_episodes)
+    ]
     print(f"episodes={args.episodes}")
-    print(f"standup_reached_rate={result[:, 0].mean().item():.4f}")
+    standup_rate = result[:, 0].mean().item()
+    print(f"window_episodes={args.window_episodes}")
+    for index, rate in enumerate(window_rates):
+        print(f"window_success_rate[{index}]={rate:.4f}")
+    # Preserve a simple scalar for the common one-window acceptance case.
+    print(f"window_success_rate={window_rates[-1]:.4f}")
+    print(f"standup_reached_rate={standup_rate:.4f}")
     print(f"post_task_entry_rate={result[:, 1].mean().item():.4f}")
     print(f"quiet_hold_success_rate={result[:, 2].mean().item():.4f}")
     print(f"mean_max_base_height={result[:, 3].mean().item():.4f}")

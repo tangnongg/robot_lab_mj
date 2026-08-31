@@ -665,8 +665,9 @@ def unitree_g1_host_env_cfg(
                     # The shared level maps only to force and action scale.
                     "initial_action_rescale": initial_action_rescale,
                     "min_action_rescale": 0.25,
-                    "window_episodes": 1024,
-                    "promote_success_rate": 0.75,
+                    # Defaults; the training CLI can override both values.
+                    "window_episodes": mdp.DEFAULT_WINDOW_EPISODES,
+                    "promote_success_rate": mdp.DEFAULT_PROMOTE_SUCCESS_RATE,
                     "promote_level_step": 0.05,
                 },
             ),

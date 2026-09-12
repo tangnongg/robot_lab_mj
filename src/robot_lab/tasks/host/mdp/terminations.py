@@ -40,8 +40,9 @@ def standup_lost(
     env: "ManagerBasedRlEnv",
     min_height: float = 0.58,
     upright_gravity_z: float = -0.65,
-    min_head_height: float = 1.00,
+    min_torso_height: float = 0.64,
     lost_steps: int = 8,
+    torso_body_name: str = "torso_link",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """End an episode when a confirmed stand collapses back to kneeling.
@@ -50,15 +51,15 @@ def standup_lost(
     the height/orientation hysteresis makes a confirmed stand fail clearly
     once it returns to the kneeling pivot that caused the old spin behavior.
     """
-    phase = getattr(env, "host_standup_phase", None)
-    if phase is None:
+    confirmed = getattr(env, "host_standup_success", None)
+    if confirmed is None:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    confirmed = phase > 0
     asset: Entity = env.scene[asset_cfg.name]
-    head_idx = list(asset.site_names).index("head_link")
-    head_height = asset.data.site_pos_w[:, head_idx, 2]
-    standing = (head_height > min_head_height) & (
-        asset.data.projected_gravity_b[:, 2] < upright_gravity_z
+    torso_idx = list(asset.body_names).index(torso_body_name)
+    standing = (
+        (asset.data.root_link_pos_w[:, 2] > min_height)
+        & (asset.data.projected_gravity_b[:, 2] < upright_gravity_z)
+        & (asset.data.body_link_pos_w[:, torso_idx, 2] > min_torso_height)
     )
     if not hasattr(env, "host_standup_lost_steps"):
         env.host_standup_lost_steps = torch.zeros(

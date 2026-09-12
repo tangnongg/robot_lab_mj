@@ -1,7 +1,8 @@
 """Custom reward functions for HoST stand-up task.
 
-Ported from Isaac Lab to mjlab API. The head marker is represented by the
-MuJoCo ``head_link`` site on the G1 torso body.
+Ported from Isaac Lab to mjlab API. Body name differences:
+- ``keyframe_head_link`` → ``head_link``
+- ``body_pos_w`` → ``body_link_pos_w``
 
 All functions receive ``env: ManagerBasedRlEnv`` and return a per-environment
 reward tensor of shape ``(num_envs,)``.
@@ -22,12 +23,6 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
-_HEAD_SITE_CFG = SceneEntityCfg("robot", site_names=("head_link",))
-
-
-def _head_site_index(asset: Entity) -> int:
-    """Return the MuJoCo site index for the robot's head marker."""
-    return list(asset.site_names).index("head_link")
 
 
 # ---------------------------------------------------------------------------
@@ -59,34 +54,67 @@ def _tolerance(
     return torch.where(in_bounds, 1.0, _sigmoid(d.double(), value_at_margin).float())
 
 
-def _post_task_active(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    """Return one for environments currently in the POST_TASK phase."""
-    phase = getattr(env, "host_standup_phase", None)
-    if phase is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    return (phase == 2).float()
-
-
-def _post_shape_ramp(
-    env: "ManagerBasedRlEnv",
-    ramp_steps: int = 100,
+def _post_task_gate(
+    asset: Entity,
+    phase3_height: float,
+    upright_gravity_z: float = -0.70,
 ) -> torch.Tensor:
-    """Smoothly turn on pose-shaping after entering POST_TASK.
+    """Gate post-task rewards on both standing height and upright attitude."""
+    return (
+        (asset.data.root_link_pos_w[:, 2] > phase3_height)
+        & (asset.data.projected_gravity_b[:, 2] < upright_gravity_z)
+    ).float()
 
-    A hard switch from no post-task shaping to the full symmetry/foot target
-    creates a large policy-gradient discontinuity exactly when the robot is
-    trying to finish its final balance correction.  The ramp keeps the actor
-    free to stabilize first, then progressively enforces the requested
-    symmetric quiet pose.
-    """
+
+def _post_task_settled(
+    env: "ManagerBasedRlEnv",
+    asset: Entity,
+    phase3_height: float,
+    settle_steps: int = 35,
+) -> torch.Tensor:
+    """Post-task gate delayed until the upright state has settled briefly."""
+    course_level = getattr(env, "host_curriculum_level", None)
+    if course_level is None:
+        course_level = torch.zeros((), device=env.device)
+    course_level = course_level.clamp(0.0, 1.0)
+    # Early levels shape quiet standing as soon as the torso is nearly upright;
+    # the gate rises linearly to the final geometric standing target.
+    early_height = min(0.50, phase3_height)
+    gate_height = early_height + (phase3_height - early_height) * course_level
+    gate_upright = -0.45 + (-0.80 + 0.45) * course_level
+    gate = (
+        (asset.data.root_link_pos_w[:, 2] > gate_height)
+        & (asset.data.projected_gravity_b[:, 2] < gate_upright)
+    ).float()
+    active = getattr(env, "host_standup_success", None)
+    if active is not None:
+        gate = gate * active.float()
     steps = getattr(env, "host_post_task_steps", None)
-    active = _post_task_active(env)
     if steps is None:
+        return gate
+    # The same outer curriculum that controls the hold counter also controls
+    # when static post-task shaping starts.  Otherwise early large-action
+    # episodes receive no quiet-standing signal until the final 35-step delay.
+    settle_targets = getattr(env, "host_standup_hold_settle_steps", None)
+    if settle_targets is None:
+        settle_targets = torch.full(
+            (env.num_envs,), settle_steps, dtype=torch.long, device=env.device
+        )
+    # Keep a short post-latch buffer even at the easiest course level so the
+    # post critic cannot suppress the large final stand-up correction.
+    settle_targets = torch.maximum(
+        settle_targets,
+        torch.full_like(settle_targets, min(10, settle_steps)),
+    )
+    return gate * (steps >= settle_targets).float()
+
+
+def _post_pose_lock(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Return the per-episode natural-pose lock mask."""
+    locked = getattr(env, "host_post_pose_locked", None)
+    if locked is None:
         return torch.zeros(env.num_envs, device=env.device)
-    return active * (
-        steps.to(dtype=torch.float32)
-        / max(float(ramp_steps), 1.0)
-    ).clamp(0.0, 1.0)
+    return locked.float()
 
 
 # ---------------------------------------------------------------------------
@@ -111,53 +139,99 @@ def reward_orientation(
 
 def reward_head_height(
     env: "ManagerBasedRlEnv",
-    min_head_height: float = 1.35,
-    progress_start_height: float = 0.0,
-    asset_cfg: SceneEntityCfg = _HEAD_SITE_CFG,
+    target_head_height: float = 1.0,
+    target_head_margin: float = 1.0,
+    head_body_name: str = "torso_link",
+    foot_body_names: list[str] | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Provide dense monotonic progress toward the standing head height.
-
-    The reward is a smoothstep from the ground datum
-    (``progress_start_height=0``) to the desired lower bound.  The reset
-    body's 0.5 m spawn offset is transient and is not treated as a task
-    baseline; after settling, the head rises from the floor toward the target.
-    The reward then saturates at the target and never penalizes a taller head.
-    """
+    """Reward torso/head height in the world frame, as defined in HoST."""
     asset: Entity = env.scene[asset_cfg.name]
-    head_height = asset.data.site_pos_w[:, _head_site_index(asset), 2]
-    span = max(min_head_height - progress_start_height, 1e-3)
-    progress = (
-        (head_height - progress_start_height) / span
-    ).clamp(0.0, 1.0)
-    return progress * progress * (3.0 - 2.0 * progress)
+    body_names = list(asset.body_names)
+
+    head_idx = body_names.index(head_body_name)
+    head_height = asset.data.body_link_pos_w[:, head_idx, 2:3]
+
+    if foot_body_names is None:
+        foot_body_names = ["left_ankle_roll_link", "right_ankle_roll_link"]
+    foot_indices = [body_names.index(n) for n in foot_body_names]
+    reward = _tolerance(
+        head_height, (target_head_height, np.inf), target_head_margin, 0.1
+    )
+    return reward.squeeze(-1)
 
 
 def reward_standup_hold_progress(
     env: "ManagerBasedRlEnv",
-    min_head_height: float = 1.35,
-    upright_gravity_z: float = -0.55,
-    transition_steps_required: int = 10,
-    quiet_root_ang_vel: float = 0.6,
+    threshold_height: float = 0.60,
+    min_torso_height: float = 0.66,
+    upright_gravity_z: float = -0.70,
+    settle_steps: int = 35,
+    quiet_root_ang_vel: float = 1.0,
     quiet_root_lin_vel: float = 0.6,
     quiet_joint_vel: float = 2.0,
+    quiet_root_ang_vel_initial: float = 3.0,
+    quiet_root_lin_vel_initial: float = 2.0,
+    quiet_joint_vel_initial: float = 8.0,
+    hold_threshold_height_initial: float = 0.52,
+    hold_min_torso_height_initial: float = 0.45,
+    hold_upright_gravity_z_initial: float = -0.55,
     no_orientation: bool = False,
-    asset_cfg: SceneEntityCfg = _HEAD_SITE_CFG,
+    torso_body_name: str = "torso_link",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward maintaining the standing condition during TRANSITION."""
-    phase = getattr(env, "host_standup_phase", None)
-    transition_steps = getattr(env, "host_standup_transition_steps", None)
-    if phase is None or transition_steps is None:
+    """Reward quiet standing with a dense, yaw-invariant soft gate.
+
+    ``host_standup_success`` is still the phase latch, but the geometric and
+    velocity checks are deliberately continuous.  The boolean checks in the
+    event function remain the curriculum/diagnostic definition; they are too
+    sparse to be the only policy-learning signal when the robot is settling.
+    """
+    active = getattr(env, "host_standup_success", None)
+    hold_steps = getattr(env, "host_standup_hold_steps", None)
+    required = getattr(env, "host_standup_hold_required_steps", None)
+    if active is None or hold_steps is None or required is None:
         return torch.zeros(env.num_envs, device=env.device)
 
     asset: Entity = env.scene[asset_cfg.name]
-    head_height = asset.data.site_pos_w[:, _head_site_index(asset), 2]
-    settle_progress = (
-        transition_steps.to(dtype=torch.float32)
-        / max(float(transition_steps_required), 1.0)
-    ).clamp(0.0, 1.0)
+    torso_idx = list(asset.body_names).index(torso_body_name)
+    root_height = asset.data.root_link_pos_w[:, 2]
+    torso_height = asset.data.body_link_pos_w[:, torso_idx, 2]
+    post_steps = getattr(env, "host_post_task_steps", None)
+    if post_steps is not None:
+        settle_targets = getattr(env, "host_standup_hold_settle_steps", None)
+        if settle_targets is None:
+            settle_targets = torch.full(
+                (env.num_envs,), settle_steps, dtype=torch.long, device=env.device
+            )
+        settle_progress = (
+            post_steps.to(dtype=torch.float32)
+            / settle_targets.to(dtype=torch.float32).clamp(min=1.0)
+        ).clamp(0.0, 1.0)
+    else:
+        settle_progress = torch.ones(env.num_envs, device=env.device)
+    course_level = getattr(env, "host_curriculum_level", None)
+    if course_level is None:
+        course_level = torch.zeros((), device=env.device)
+    course_level = course_level.clamp(0.0, 1.0)
+    current_hold_threshold_height = hold_threshold_height_initial + (
+        threshold_height - hold_threshold_height_initial
+    ) * course_level
+    current_hold_min_torso_height = hold_min_torso_height_initial + (
+        min_torso_height - hold_min_torso_height_initial
+    ) * course_level
+    current_hold_upright_gravity_z = hold_upright_gravity_z_initial + (
+        upright_gravity_z - hold_upright_gravity_z_initial
+    ) * course_level
     height_gate = _tolerance(
-        head_height,
-        (min_head_height, np.inf),
+        root_height,
+        (current_hold_threshold_height, np.inf),
+        margin=0.10,
+        value_at_margin=0.10,
+    )
+    height_gate = height_gate * _tolerance(
+        torso_height,
+        (current_hold_min_torso_height, np.inf),
         margin=0.12,
         value_at_margin=0.10,
     )
@@ -168,22 +242,28 @@ def reward_standup_hold_progress(
         # Projected gravity is invariant to world yaw, while roll/pitch
         # excursions are still strongly discouraged.
         upright_gate = torch.exp(-6.0 * torch.sum(torch.square(gravity_xy), dim=1))
+    current_quiet_root_ang_vel = quiet_root_ang_vel_initial + (
+        quiet_root_ang_vel - quiet_root_ang_vel_initial
+    ) * course_level
+    current_quiet_root_lin_vel = quiet_root_lin_vel_initial + (
+        quiet_root_lin_vel - quiet_root_lin_vel_initial
+    ) * course_level
+    current_quiet_joint_vel = quiet_joint_vel_initial + (
+        quiet_joint_vel - quiet_joint_vel_initial
+    ) * course_level
     ang_xy = torch.linalg.vector_norm(asset.data.root_link_ang_vel_b[:, :2], dim=1)
     lin_xy = torch.linalg.vector_norm(asset.data.root_link_lin_vel_b[:, :2], dim=1)
     joint_rms = torch.sqrt(torch.mean(torch.square(asset.data.joint_vel), dim=1))
     quiet_gate = torch.exp(
-        -torch.square(ang_xy / max(quiet_root_ang_vel, 0.1))
-        -torch.square(lin_xy / max(quiet_root_lin_vel, 0.1))
-        -torch.square(joint_rms / max(quiet_joint_vel, 0.1))
+        -torch.square(ang_xy / current_quiet_root_ang_vel.clamp(min=0.1))
+        -torch.square(lin_xy / current_quiet_root_lin_vel.clamp(min=0.1))
+        -torch.square(joint_rms / current_quiet_joint_vel.clamp(min=0.1))
     )
-    progress = settle_progress.expand_as(quiet_gate)
-    return (
-        (phase == 1).float()
-        * progress
-        * height_gate
-        * upright_gate
-        * quiet_gate
-    )
+    progress = (
+        (hold_steps.to(dtype=torch.float32) + 1.0)
+        / required.to(dtype=torch.float32).clamp(min=1.0)
+    ).clamp(0.0, 1.0)
+    return active.float() * progress * height_gate * upright_gate * quiet_gate * settle_progress
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +450,7 @@ def reward_shoulder_roll_deviation(
 def reward_left_foot_displacement(
     env: "ManagerBasedRlEnv",
     sigma: float = -2.0,
+    phase3_height: float = 0.65,
     foot_body_name: str = "left_ankle_pitch_link",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -382,13 +463,14 @@ def reward_left_foot_displacement(
     foot_z = asset.data.body_link_pos_w[:, foot_idx, 2]
     mse = torch.sum(torch.square(base_xy - foot_xy), dim=-1).clamp(min=0.3)
     reward = torch.exp(mse * sigma) * (foot_z < 0.3).float()
-    standup = _post_task_active(env)
+    standup = _post_task_gate(asset, phase3_height)
     return reward * standup
 
 
 def reward_right_foot_displacement(
     env: "ManagerBasedRlEnv",
     sigma: float = -2.0,
+    phase3_height: float = 0.65,
     foot_body_name: str = "right_ankle_pitch_link",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -401,7 +483,7 @@ def reward_right_foot_displacement(
     foot_z = asset.data.body_link_pos_w[:, foot_idx, 2]
     mse = torch.sum(torch.square(base_xy - foot_xy), dim=-1).clamp(min=0.3)
     reward = torch.exp(mse * sigma) * (foot_z < 0.3).float()
-    standup = _post_task_active(env)
+    standup = _post_task_gate(asset, phase3_height)
     return reward * standup
 
 
@@ -534,6 +616,7 @@ def reward_style_ang_vel_xy(
 
 def reward_target_ang_vel_xy(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Encourage low angular velocity when standing."""
@@ -543,17 +626,18 @@ def reward_target_ang_vel_xy(
         torch.sum(torch.square(ang_vel[:, :2]), dim=1)
         + 0.25 * torch.square(ang_vel[:, 2])
     )
-    standup = _post_task_active(env)
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(weighted_sq * -2) * standup
 
 
 def reward_post_root_ang_vel_l2(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Post-task cost for roll/pitch motion and weaker yaw spin."""
     asset: Entity = env.scene[asset_cfg.name]
-    standup = _post_task_active(env)
+    standup = _post_task_settled(env, asset, phase3_height)
     ang_vel = asset.data.root_link_ang_vel_b
     weighted_sq = (
         torch.sum(torch.square(ang_vel[:, :2]), dim=1)
@@ -564,63 +648,69 @@ def reward_post_root_ang_vel_l2(
 
 def reward_target_lin_vel_xy(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Encourage low linear velocity when standing."""
     asset: Entity = env.scene[asset_cfg.name]
     lin_vel = asset.data.root_link_lin_vel_b[:, :2]
-    standup = _post_task_active(env)
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(torch.sum(torch.square(lin_vel), dim=1) * -5) * standup
 
 
 def reward_post_root_lin_vel_l2(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Post-task cost for all three root linear-velocity components."""
     asset: Entity = env.scene[asset_cfg.name]
-    standup = _post_task_active(env)
+    standup = _post_task_settled(env, asset, phase3_height)
     return torch.sum(torch.square(asset.data.root_link_lin_vel_b), dim=1) * standup
 
 
 def reward_post_joint_vel_l2(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Post-task cost for residual joint motion."""
     asset: Entity = env.scene[asset_cfg.name]
-    standup = _post_task_active(env)
+    standup = _post_task_settled(env, asset, phase3_height)
     return torch.sum(torch.square(asset.data.joint_vel), dim=1) * standup
 
 
 def reward_post_joint_acc_l2(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Post-task cost for high-frequency joint jitter."""
     asset: Entity = env.scene[asset_cfg.name]
-    standup = _post_task_active(env)
+    standup = _post_task_settled(env, asset, phase3_height)
     return torch.sum(torch.square(asset.data.joint_acc), dim=1) * standup
 
 
 def reward_post_action_rate_l2(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Post-task cost for changing the joint targets."""
     asset: Entity = env.scene[asset_cfg.name]
-    standup = _post_task_active(env)
+    standup = _post_task_settled(env, asset, phase3_height)
     delta = env.action_manager.action - env.action_manager.prev_action
     return torch.sum(torch.square(delta), dim=1) * standup
 
 
 def reward_post_smoothness_l2(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Post-task cost for second-order target changes."""
     asset: Entity = env.scene[asset_cfg.name]
-    standup = _post_task_active(env)
+    standup = _post_task_settled(env, asset, phase3_height)
     action = env.action_manager.action
     prev = env.action_manager.prev_action
     if hasattr(env, "host_last_last_action"):
@@ -628,6 +718,28 @@ def reward_post_smoothness_l2(
     else:
         delta2 = action - prev
     return torch.sum(torch.square(delta2), dim=1) * standup
+
+
+def reward_post_pose_drift(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize drifting from the naturally captured standing joint pose."""
+    asset: Entity = env.scene[asset_cfg.name]
+    reference = getattr(env, "host_joint_pose_ref", None)
+    if reference is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.mean(torch.square(asset.data.joint_pos - reference), dim=1) * _post_pose_lock(env)
+
+
+def reward_post_action_drift(env: "ManagerBasedRlEnv") -> torch.Tensor:
+    """Penalize changing the target action after the natural pose is locked."""
+    reference = getattr(env, "host_action_ref", None)
+    if reference is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.mean(
+        torch.square(env.action_manager.action - reference), dim=1
+    ) * _post_pose_lock(env)
 
 
 _POST_SYMMETRIC_JOINTS = (
@@ -674,7 +786,8 @@ _POST_MIRROR_PAIRS = (
 
 def reward_post_symmetric_pose(
     env: "ManagerBasedRlEnv",
-    ramp_steps: int = 100,
+    phase3_height: float = 0.65,
+    settle_steps: int = 50,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Penalize one concise, mirrored full-body standing pose.
@@ -717,16 +830,16 @@ def reward_post_symmetric_pose(
         if pair_costs
         else torch.zeros_like(target_cost)
     )
-    standup = _post_task_active(env)
-    ramp = _post_shape_ramp(env, ramp_steps)
-    return (target_cost + 0.5 * symmetry_cost) * standup * ramp
+    standup = _post_task_settled(env, asset, phase3_height, settle_steps)
+    return (target_cost + 0.5 * symmetry_cost) * standup
 
 
 def reward_post_foot_alignment(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     target_width: float = 0.237,
     target_x: float = 0.0,
-    ramp_steps: int = 100,
+    settle_steps: int = 50,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Penalize wide, staggered, or non-parallel feet in the root frame."""
@@ -761,9 +874,8 @@ def reward_post_foot_alignment(
     foot_forward_w = quat_apply(asset.data.body_link_quat_w[:, foot_ids, :], forward_w)
     foot_forward_b = quat_apply_inverse(root_quat, foot_forward_w)
     parallel_cost = torch.sum(torch.square(foot_forward_b[:, 0] - foot_forward_b[:, 1]), dim=1)
-    standup = _post_task_active(env)
-    ramp = _post_shape_ramp(env, ramp_steps)
-    return (position_cost + parallel_cost) * standup * ramp
+    standup = _post_task_settled(env, asset, phase3_height, settle_steps)
+    return (position_cost + parallel_cost) * standup
 
 
 def _foot_contact_by_side(
@@ -788,6 +900,7 @@ def _foot_contact_by_side(
 
 def reward_post_feet_slip(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     sensor_name: str = "feet_ground_contact",
     left_foot_body: str = "left_ankle_roll_link",
     right_foot_body: str = "right_ankle_roll_link",
@@ -802,12 +915,13 @@ def reward_post_feet_slip(
     left_contact, right_contact = _foot_contact_by_side(sensor)
     contact = torch.stack((left_contact, right_contact), dim=1).to(foot_vel_xy.dtype)
     cost = torch.sum(torch.square(foot_vel_xy).sum(dim=-1) * contact, dim=1)
-    standup = _post_task_active(env)
+    standup = _post_task_settled(env, asset, phase3_height)
     return cost * standup
 
 
 def reward_target_upper_dof_pos(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     sigma: float = -0.1,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -824,16 +938,30 @@ def reward_target_upper_dof_pos(
     target = asset.data.default_joint_pos[:, upper_idx]
     current = asset.data.joint_pos[:, upper_idx]
     mse = torch.sum(torch.square(current - target), dim=-1)
-    standup = _post_task_active(env)
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(mse * sigma) * standup
 
 
 def reward_target_orientation(
     env: "ManagerBasedRlEnv",
+    phase3_height: float = 0.65,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Encourage flat orientation when standing."""
     asset: Entity = env.scene[asset_cfg.name]
     gravity_proj = asset.data.projected_gravity_b[:, :2]
-    standup = _post_task_active(env)
+    standup = _post_task_gate(asset, phase3_height)
     return torch.exp(torch.sum(torch.square(gravity_proj), dim=1) * -5) * standup
+
+
+def reward_target_base_height(
+    env: "ManagerBasedRlEnv",
+    target_height: float = 0.75,
+    phase3_height: float = 0.65,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Encourage target base height when standing."""
+    asset: Entity = env.scene[asset_cfg.name]
+    base_height = asset.data.root_link_pos_w[:, 2]
+    standup = _post_task_gate(asset, phase3_height)
+    return torch.exp(torch.square(base_height - target_height) * -20) * standup

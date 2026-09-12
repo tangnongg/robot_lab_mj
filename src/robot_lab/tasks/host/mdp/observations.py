@@ -133,8 +133,9 @@ def action_rescale_obs(
 
 
 def critic_phase(env: "ManagerBasedRlEnv") -> torch.Tensor:
-    """Training-only bit: one only while the POST_TASK critic is active."""
-    phase = getattr(env, "host_standup_phase", None)
-    if phase is None:
-        return torch.zeros((env.num_envs, 1), device=env.device)
-    return (phase == 2).to(dtype=torch.float32).unsqueeze(-1)
+    """Training-only phase bit used to select the two value heads."""
+    if not hasattr(env, "host_standup_success"):
+        env.host_standup_success = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+    return env.host_standup_success.to(dtype=torch.float32).unsqueeze(-1)

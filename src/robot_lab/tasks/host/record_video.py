@@ -27,11 +27,6 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--force", type=float, default=0.0)
     parser.add_argument("--action-rescale", type=float, default=0.25)
-    parser.add_argument(
-        "--deterministic",
-        action="store_true",
-        help="Use the policy mean instead of the stochastic PPO action sampler.",
-    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -74,11 +69,7 @@ def main() -> None:
         obs = env.get_observations()
         for _ in range(args.frames):
             with torch.inference_mode():
-                # Keep recorded rollouts consistent with PPO's training-time
-                # action sampling unless deterministic mode is requested.
-                obs, *_ = env.step(
-                    policy(obs, stochastic_output=not args.deterministic)
-                )
+                obs, *_ = env.step(policy(obs))
     finally:
         env.close()
 
